@@ -4,10 +4,13 @@
   "private": false,
   "type": "module",
   "license": "MIT",
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "dev": "tsx watch src/server.ts",
-    "start": "node dist/server.js",
+    "start": "node dist/src/server.js",
     "test": "vitest run",
     "test:watch": "vitest",
     "typecheck": "tsc -p tsconfig.json --noEmit"
