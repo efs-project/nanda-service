@@ -66,6 +66,16 @@ describe("HTTP API", () => {
       writer_modes: ["offline"],
       planned_writer_modes: ["sepolia"],
       sepolia_status: "not_implemented",
+      sepolia_preflight: "implemented_read_only",
+      sepolia_config: {
+        ready: false,
+        missing: [
+          "SEPOLIA_RPC_URL",
+          "SERVICE_SPONSOR_PRIVATE_KEY",
+          "RECEIPT_SIGNER_PRIVATE_KEY",
+          "AGENT_KEY_DERIVATION_SECRET"
+        ]
+      },
       efs: {
         sepolia: { chainId: 11155111 },
         schema_uids: {

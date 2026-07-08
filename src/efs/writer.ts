@@ -2,6 +2,7 @@ import { z } from "zod";
 
 import type { DerivedAttester } from "../auth/derived-attester.js";
 import type { AuthContext } from "../auth/subject.js";
+import { EFS_TRANSPORTS } from "../config/chains.js";
 import type { EfsScribeReceipt, VerificationCheck } from "../receipts/schema.js";
 
 export type WriterMode = "offline" | "sepolia";
@@ -10,7 +11,7 @@ export type Uid = Hex;
 export type RefOrUid = Uid | { ref: string } | { external: string };
 
 const MirrorSchema = z.object({
-  transport: z.string().min(1),
+  transport: z.enum(EFS_TRANSPORTS),
   uri: z.string().min(1).max(2048)
 });
 

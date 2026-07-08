@@ -20,6 +20,8 @@ Reads and verification are public. Writes require an API key.
 
 Current mode: `offline`. Offline receipts are deterministic and do not make
 network or chain calls. Sepolia writes are planned but not enabled yet.
+Read-only Sepolia preflight exists in the service code, but it is not a public
+write mode yet.
 
 ## Check Capabilities
 

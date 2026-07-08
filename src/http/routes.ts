@@ -118,6 +118,11 @@ export async function registerRoutes(app: FastifyInstance, config: AppConfig): P
     writer_modes: ["offline"],
     planned_writer_modes: ["sepolia"],
     sepolia_status: "not_implemented",
+    sepolia_preflight: "implemented_read_only",
+    sepolia_config: {
+      ready: config.sepolia.ready,
+      missing: config.sepolia.missing
+    },
     content_modes: ["inline_base64", "hash_only", "external_mirror_only"],
     writes_require_auth: true,
     efs: {

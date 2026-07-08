@@ -90,6 +90,10 @@ curl 'http://localhost:3000/v1/resolve?path=%2Fagents%2Fdemo%2Fstatus.json'
 
 Both modes use the same request and receipt shape.
 
+The codebase includes read-only Sepolia preflight helpers for resolving
+`rootAnchorUID`, path anchors, and `/transports/<name>` anchors before the real
+submitter sends EAS transactions.
+
 ## Safety
 
 Do not write secrets, private keys, personal data, or confidential URLs. EFS

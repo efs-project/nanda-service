@@ -2,18 +2,36 @@ import "dotenv/config";
 
 import { z } from "zod";
 
-import { SEPOLIA_CHAIN_ID } from "./chains.js";
+import { SEPOLIA_CHAIN_ID, SEPOLIA_EAS_ADDRESS } from "./chains.js";
 import type { WriterMode } from "../efs/writer.js";
+
+const DEFAULT_DERIVATION_SECRET = "offline-development-secret";
 
 const EnvSchema = z.object({
   EFS_SCRIBE_MODE: z.enum(["offline", "sepolia"]).default("offline"),
   API_KEYS_JSON: z.string().default('{"demo-key":"api-key:demo-agent"}'),
-  AGENT_KEY_DERIVATION_SECRET: z.string().default("offline-development-secret"),
+  AGENT_KEY_DERIVATION_SECRET: z.string().default(DEFAULT_DERIVATION_SECRET),
   PUBLIC_BASE_URL: z.string().url().default("http://localhost:3000"),
   PORT: z.coerce.number().int().positive().default(3000),
   LOG_LEVEL: z.string().default("info"),
-  EFS_CHAIN_ID: z.coerce.number().int().positive().default(SEPOLIA_CHAIN_ID)
+  EFS_CHAIN_ID: z.coerce.number().int().positive().default(SEPOLIA_CHAIN_ID),
+  EFS_EAS_ADDRESS: z
+    .string()
+    .regex(/^0x[0-9a-fA-F]{40}$/)
+    .default(SEPOLIA_EAS_ADDRESS),
+  SEPOLIA_RPC_URL: z.string().default(""),
+  SERVICE_SPONSOR_PRIVATE_KEY: z.string().default(""),
+  RECEIPT_SIGNER_PRIVATE_KEY: z.string().default("")
 });
+
+export interface SepoliaConfig {
+  ready: boolean;
+  missing: string[];
+  rpcUrl?: string;
+  easAddress: `0x${string}`;
+  serviceSponsorPrivateKey?: `0x${string}`;
+  receiptSignerPrivateKey?: `0x${string}`;
+}
 
 export interface AppConfig {
   mode: WriterMode;
@@ -23,10 +41,12 @@ export interface AppConfig {
   port: number;
   logLevel: string;
   chainId: number;
+  sepolia: SepoliaConfig;
 }
 
 export function parseEnv(env: NodeJS.ProcessEnv = process.env): AppConfig {
   const parsed = EnvSchema.parse(env);
+  const sepolia = buildSepoliaConfig(parsed);
   return {
     mode: parsed.EFS_SCRIBE_MODE,
     apiKeysJson: parsed.API_KEYS_JSON,
@@ -34,6 +54,61 @@ export function parseEnv(env: NodeJS.ProcessEnv = process.env): AppConfig {
     publicBaseUrl: parsed.PUBLIC_BASE_URL,
     port: parsed.PORT,
     logLevel: parsed.LOG_LEVEL,
-    chainId: parsed.EFS_CHAIN_ID
+    chainId: parsed.EFS_CHAIN_ID,
+    sepolia
   };
+}
+
+function buildSepoliaConfig(parsed: z.infer<typeof EnvSchema>): SepoliaConfig {
+  const missing: string[] = [];
+  const rpcUrl = usableUrl(parsed.SEPOLIA_RPC_URL);
+  const serviceSponsorPrivateKey = usablePrivateKey(parsed.SERVICE_SPONSOR_PRIVATE_KEY);
+  const receiptSignerPrivateKey = usablePrivateKey(parsed.RECEIPT_SIGNER_PRIVATE_KEY);
+
+  if (rpcUrl === undefined) {
+    missing.push("SEPOLIA_RPC_URL");
+  }
+  if (serviceSponsorPrivateKey === undefined) {
+    missing.push("SERVICE_SPONSOR_PRIVATE_KEY");
+  }
+  if (receiptSignerPrivateKey === undefined) {
+    missing.push("RECEIPT_SIGNER_PRIVATE_KEY");
+  }
+  if (isPlaceholderSecret(parsed.AGENT_KEY_DERIVATION_SECRET)) {
+    missing.push("AGENT_KEY_DERIVATION_SECRET");
+  }
+
+  return {
+    ready: missing.length === 0,
+    missing,
+    rpcUrl,
+    easAddress: parsed.EFS_EAS_ADDRESS as `0x${string}`,
+    serviceSponsorPrivateKey,
+    receiptSignerPrivateKey
+  };
+}
+
+function usableUrl(value: string): string | undefined {
+  const trimmed = value.trim();
+  if (trimmed.length === 0 || /^replace/i.test(trimmed)) {
+    return undefined;
+  }
+  return trimmed;
+}
+
+function usablePrivateKey(value: string): `0x${string}` | undefined {
+  const trimmed = value.trim();
+  if (/^0x[0-9a-fA-F]{64}$/.test(trimmed)) {
+    return trimmed as `0x${string}`;
+  }
+  return undefined;
+}
+
+function isPlaceholderSecret(value: string): boolean {
+  const trimmed = value.trim();
+  return (
+    trimmed.length < 16 ||
+    trimmed === DEFAULT_DERIVATION_SECRET ||
+    /^replace/i.test(trimmed)
+  );
 }

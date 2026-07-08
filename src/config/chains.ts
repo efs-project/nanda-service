@@ -3,6 +3,23 @@ import type { Hex } from "viem";
 export const SEPOLIA_CHAIN_ID = 11155111;
 export const SEPOLIA_EAS_ADDRESS = "0xC2679fBD37d54388Ce493F1DB75320D236e1815e" as const;
 
+export const EFS_TRANSPORTS = [
+  "onchain",
+  "data",
+  "ipfs",
+  "arweave",
+  "magnet",
+  "https",
+  "ftp",
+  "s3",
+  "gs",
+  "dat",
+  "rsync",
+  "bittorrent"
+] as const;
+
+export type EfsTransport = (typeof EFS_TRANSPORTS)[number];
+
 export const EFS_SCHEMA_UIDS = {
   ANCHOR: "0xf818abd74da70345c8acd7087e6ce69fd48eaf4e79c1931e5c6b08fb148c921a",
   PROPERTY: "0xa1f54f2d395c24077e374d9a2d835a2d2fcb3b4c3e019f63525bee3424f1c246",

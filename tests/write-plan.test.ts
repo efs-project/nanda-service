@@ -171,6 +171,23 @@ describe("buildFileWritePlan", () => {
       )
     ).toThrow(/size/);
   });
+
+  it("rejects mirror transports that are not seeded EFS transport anchors", () => {
+    expect(() =>
+      buildFileWritePlan(
+        {
+          path: "/agents/demo/status.json",
+          content: {
+            mode: "hash_only",
+            payload_sha256:
+              "sha256:43258cff783fe7036d8a43033f830adfc60ec037382473548ac742b888292777"
+          },
+          mirrors: [{ transport: "../ipfs" as never, uri: "ipfs://example" }]
+        },
+        context
+      )
+    ).toThrow();
+  });
 });
 
 function symbolicRef(value: unknown): string | undefined {
