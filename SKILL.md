@@ -20,6 +20,8 @@ Authorization: Bearer <api-key>
 ```
 
 Reads and verification are public. Writes require an API key.
+Set `EFS_SCRIBE_API_KEY` to the key you were given before making write
+requests.
 
 The service may run in `offline` or `sepolia` mode. Offline receipts are
 deterministic and do not make network or chain calls. Sepolia mode submits real
@@ -36,7 +38,7 @@ curl https://efs-scribe-production.up.railway.app/v1/capabilities
 ```bash
 curl -X POST https://efs-scribe-production.up.railway.app/v1/files/plan \
   -H 'content-type: application/json' \
-  -H 'authorization: Bearer local-scribe-key' \
+  -H "authorization: Bearer $EFS_SCRIBE_API_KEY" \
   -d '{
     "path": "/agents/demo/status.json",
     "content": {
@@ -66,7 +68,7 @@ chain writer must resolve first. It does not store a receipt.
 ```bash
 curl -X POST https://efs-scribe-production.up.railway.app/v1/files \
   -H 'content-type: application/json' \
-  -H 'authorization: Bearer local-scribe-key' \
+  -H "authorization: Bearer $EFS_SCRIBE_API_KEY" \
   -d '{
     "path": "/agents/demo/status.json",
     "content": {

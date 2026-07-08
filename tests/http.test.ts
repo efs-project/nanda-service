@@ -124,6 +124,7 @@ describe("HTTP API", () => {
     expect(skill.headers["content-type"]).toContain("text/markdown");
     expect(skill.body).toContain("EFS Scribe");
     expect(skill.body).toContain("https://efs-scribe-production.up.railway.app");
+    expect(skill.body).toContain("EFS_SCRIBE_API_KEY");
     expect(openapi.statusCode).toBe(200);
     expect(openapi.json()).toMatchObject({
       openapi: "3.1.0",
