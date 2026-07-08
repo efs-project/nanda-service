@@ -7,7 +7,7 @@ import type { EfsScribeReceipt, VerificationCheck } from "../receipts/schema.js"
 export type WriterMode = "offline" | "sepolia";
 export type Hex = `0x${string}`;
 export type Uid = Hex;
-export type RefOrUid = Uid | { ref: string };
+export type RefOrUid = Uid | { ref: string } | { external: string };
 
 const MirrorSchema = z.object({
   transport: z.string().min(1),
@@ -73,13 +73,27 @@ export interface PlannedAttestation {
   revocable: boolean;
   refUID: RefOrUid;
   recipient?: Hex;
+  fields?: Record<string, unknown>;
+}
+
+export interface PreflightRequirement {
+  kind: "root_anchor" | "path_anchor" | "transport_anchor";
+  ref: string;
+  description: string;
+  network: "sepolia";
+  path?: string;
+  transport?: string;
+  resolvedUid?: Uid;
 }
 
 export interface EfsWritePlan {
   operation: "file.upsert";
   canonicalRequestHash: `sha256:${string}`;
+  payloadHash: `sha256:${string}`;
+  metadataHash: `sha256:${string}`;
   attester: Hex;
   path: string;
+  preflight: PreflightRequirement[];
   layers: PlannedAttestation[];
 }
 

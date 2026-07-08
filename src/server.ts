@@ -9,6 +9,9 @@ export async function buildApp(overrides: Partial<AppConfig> = {}) {
     ...parseEnv(),
     ...overrides
   };
+  if (config.mode === "sepolia") {
+    throw new Error("Sepolia writer is not implemented yet");
+  }
   const app = Fastify({
     logger: config.logLevel === "silent" ? false : { level: config.logLevel }
   });

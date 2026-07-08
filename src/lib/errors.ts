@@ -17,3 +17,11 @@ export function unauthorized(message = "Invalid or missing API key"): HttpError 
 export function badRequest(message: string): HttpError {
   return new HttpError(400, "bad_request", message);
 }
+
+export function conflict(message: string): HttpError {
+  return new HttpError(409, "conflict", message);
+}
+
+export function notFound(message: string): HttpError {
+  return new HttpError(404, "not_found", message);
+}

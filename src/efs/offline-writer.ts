@@ -1,18 +1,16 @@
-import { EFS_SCHEMA_UIDS } from "../config/chains.js";
-import { canonicalJson, sha256Hex, toMockUid } from "../lib/hash.js";
+import { toMockUid } from "../lib/hash.js";
 import { ReceiptSchema, type EfsScribeReceipt, type VerificationCheck } from "../receipts/schema.js";
+import { encodePlannedAttestationData } from "./schema-encoding.js";
 import type {
   EfsWriter,
   EfsWritePlan,
-  FileWriteRequest,
   FileWriteRequestInput,
-  Hex,
   PlannedAttestation,
   Uid,
   VerificationResult,
   WriterContext
 } from "./writer.js";
-import { FileWriteRequestSchema } from "./writer.js";
+import { buildFileWritePlan } from "./write-plan.js";
 
 interface OfflineWriterOptions {
   now?: () => Date;
@@ -27,90 +25,22 @@ export class OfflineEfsWriter implements EfsWriter {
   }
 
   async planFile(input: FileWriteRequestInput, context: WriterContext): Promise<EfsWritePlan> {
-    const parsedInput = FileWriteRequestSchema.parse(input);
-    const payloadHash = payloadSha256(parsedInput);
-    const metadataHash = sha256Hex({
-      path: parsedInput.path,
-      mirrors: parsedInput.mirrors,
-      properties: parsedInput.properties,
-      agent: parsedInput.agent
-    });
-    const canonicalRequestHash = sha256Hex({
-      operation: "file.upsert",
-      auth: context.auth.authenticated_subject,
-      path: parsedInput.path,
-      payloadHash,
-      metadataHash,
-      idempotencyKey: parsedInput.options.idempotency_key ?? null
-    });
-
-    const layers: PlannedAttestation[] = [
-      {
-        ref: "data",
-        layer: 0,
-        schema: EFS_SCHEMA_UIDS.DATA,
-        data: "0x",
-        revocable: false,
-        refUID: zeroUid()
-      },
-      {
-        ref: "contentHash.property",
-        layer: 0,
-        schema: EFS_SCHEMA_UIDS.PROPERTY,
-        data: dataHex(payloadHash),
-        revocable: false,
-        refUID: zeroUid()
-      },
-      {
-        ref: "file.anchor",
-        layer: 0,
-        schema: EFS_SCHEMA_UIDS.ANCHOR,
-        data: dataHex(parsedInput.path),
-        revocable: false,
-        refUID: zeroUid()
-      },
-      {
-        ref: "placement.pin",
-        layer: 1,
-        schema: EFS_SCHEMA_UIDS.PIN,
-        data: dataHex("definition:file-placement"),
-        revocable: true,
-        refUID: { ref: "file.anchor" }
-      },
-      {
-        ref: "contentHash.pin",
-        layer: 1,
-        schema: EFS_SCHEMA_UIDS.PIN,
-        data: dataHex("definition:contentHash"),
-        revocable: true,
-        refUID: { ref: "data" }
-      },
-      ...parsedInput.mirrors.map((mirror, index) => ({
-        ref: `mirror.${index}`,
-        layer: 1,
-        schema: EFS_SCHEMA_UIDS.MIRROR,
-        data: dataHex(canonicalJson(mirror)),
-        revocable: true,
-        refUID: { ref: "data" }
-      }))
-    ];
-
-    return {
-      operation: "file.upsert",
-      canonicalRequestHash,
-      attester: context.attester.address,
-      path: parsedInput.path,
-      layers
-    };
+    return buildFileWritePlan(input, context);
   }
 
   async submitPlan(plan: EfsWritePlan, context: WriterContext): Promise<EfsScribeReceipt> {
     const minted = new Map<string, Uid>();
+    for (const requirement of plan.preflight) {
+      minted.set(requirement.ref, toMockUid("offline-efs-external-ref", requirement.ref));
+    }
+
     for (const attestation of [...plan.layers].sort((a, b) => a.layer - b.layer)) {
       const material = {
         attester: context.attester.address,
         canonicalRequestHash: plan.canonicalRequestHash,
-        data: attestation.data,
+        data: encodePlannedAttestationData(attestation, minted),
+        definition: resolveOptionalRef(attestation.fields?.definition, minted),
+        fields: attestation.fields,
         layer: attestation.layer,
         ref: attestation.ref,
         refUID: resolveRef(attestation.refUID, minted),
@@ -121,9 +51,9 @@ export class OfflineEfsWriter implements EfsWriter {
     }
 
     const dataUid = mustGet(minted, "data");
-    const fileAnchorUid = mustGet(minted, "file.anchor");
+    const fileAnchorUid = mustGet(minted, `anchor:${plan.path}`);
     const placementPinUid = mustGet(minted, "placement.pin");
-    const contentHashPinUid = mustGet(minted, "contentHash.pin");
+    const contentHashPinUid = mustGet(minted, "property:contentHash.pin");
     const mirrorUids = [...minted.entries()]
       .filter(([ref]) => ref.startsWith("mirror."))
       .sort(([left], [right]) => left.localeCompare(right))
@@ -144,12 +74,8 @@ export class OfflineEfsWriter implements EfsWriter {
         derivation: context.attester.derivation
       },
       integrity: {
-        payload_sha256: extractPayloadHash(plan),
-        metadata_sha256: sha256Hex({
-          path: plan.path,
-          attester: context.attester.address,
-          layers: plan.layers.map((layer) => layer.ref)
-        }),
+        payload_sha256: plan.payloadHash,
+        metadata_sha256: plan.metadataHash,
         canonical_request_sha256: plan.canonicalRequestHash
       },
       efs: {
@@ -204,26 +130,37 @@ export class OfflineEfsWriter implements EfsWriter {
   }
 }
 
-function payloadSha256(input: FileWriteRequest): `sha256:${string}` {
-  if (input.content.mode === "inline_base64") {
-    return sha256Hex(Buffer.from(input.content.content_base64, "base64"));
-  }
-  return input.content.payload_sha256 as `sha256:${string}`;
-}
-
-function extractPayloadHash(plan: EfsWritePlan): `sha256:${string}` {
-  const property = plan.layers.find((layer) => layer.ref === "contentHash.property");
-  if (property === undefined) {
-    return sha256Hex("missing-content-hash-property");
-  }
-  return Buffer.from(property.data.slice(2), "hex").toString("utf8") as `sha256:${string}`;
-}
-
 function resolveRef(ref: PlannedAttestation["refUID"], minted: Map<string, Uid>): Uid {
   if (typeof ref === "string") {
     return ref;
   }
+  if ("external" in ref) {
+    return mustGet(minted, ref.external);
+  }
   return mustGet(minted, ref.ref);
+}
+
+function resolveOptionalRef(value: unknown, minted: Map<string, Uid>): Uid | undefined {
+  if (
+    value !== null &&
+    typeof value === "object" &&
+    "ref" in value &&
+    typeof value.ref === "string"
+  ) {
+    return mustGet(minted, value.ref);
+  }
+  if (typeof value === "string" && value.startsWith("0x")) {
+    return value as Uid;
+  }
+  if (
+    value !== null &&
+    typeof value === "object" &&
+    "external" in value &&
+    typeof value.external === "string"
+  ) {
+    return mustGet(minted, value.external);
+  }
+  return undefined;
 }
 
 function mustGet(minted: Map<string, Uid>, ref: string): Uid {
@@ -232,14 +169,6 @@ function mustGet(minted: Map<string, Uid>, ref: string): Uid {
     throw new Error(`Missing planned attestation ref ${ref}`);
   }
   return uid;
-}
-
-function zeroUid(): Uid {
-  return `0x${"0".repeat(64)}`;
-}
-
-function dataHex(value: string): Hex {
-  return `0x${Buffer.from(value, "utf8").toString("hex")}`;
 }
 
 function offlineChecks(input: {
