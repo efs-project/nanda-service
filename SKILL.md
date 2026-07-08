@@ -33,7 +33,7 @@ curl http://localhost:3000/v1/capabilities
 ```bash
 curl -X POST http://localhost:3000/v1/files/plan \
   -H 'content-type: application/json' \
-  -H 'authorization: Bearer demo-key' \
+  -H 'authorization: Bearer local-scribe-key' \
   -d '{
     "path": "/agents/demo/status.json",
     "content": {
@@ -63,7 +63,7 @@ chain writer must resolve first. It does not store a receipt.
 ```bash
 curl -X POST http://localhost:3000/v1/files \
   -H 'content-type: application/json' \
-  -H 'authorization: Bearer demo-key' \
+  -H 'authorization: Bearer local-scribe-key' \
   -d '{
     "path": "/agents/demo/status.json",
     "content": {

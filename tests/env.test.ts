@@ -7,7 +7,7 @@ describe("parseEnv", () => {
   it("models Sepolia config readiness without accepting placeholders", () => {
     const config = parseEnv({
       EFS_SCRIBE_MODE: "sepolia",
-      API_KEYS_JSON: '{"demo-key":"api-key:demo-agent"}',
+      API_KEYS_JSON: '{"local-scribe-key":"api-key:local-scribe-agent"}',
       AGENT_KEY_DERIVATION_SECRET: "offline-development-secret",
       PUBLIC_BASE_URL: "http://localhost:3000",
       PORT: "3000",
@@ -30,7 +30,7 @@ describe("parseEnv", () => {
   it("accepts complete Sepolia config as ready", () => {
     const config = parseEnv({
       EFS_SCRIBE_MODE: "sepolia",
-      API_KEYS_JSON: '{"demo-key":"api-key:demo-agent"}',
+      API_KEYS_JSON: '{"local-scribe-key":"api-key:local-scribe-agent"}',
       AGENT_KEY_DERIVATION_SECRET: "realistic-non-default-derivation-secret",
       PUBLIC_BASE_URL: "http://localhost:3000",
       PORT: "3000",
@@ -54,7 +54,7 @@ describe("parseEnv", () => {
   it("allows Sepolia mode without a sponsor key when automatic agent funding is disabled", () => {
     const config = parseEnv({
       EFS_SCRIBE_MODE: "sepolia",
-      API_KEYS_JSON: '{"demo-key":"api-key:demo-agent"}',
+      API_KEYS_JSON: '{"local-scribe-key":"api-key:local-scribe-agent"}',
       AGENT_KEY_DERIVATION_SECRET: "realistic-non-default-derivation-secret",
       PUBLIC_BASE_URL: "http://localhost:3000",
       PORT: "3000",

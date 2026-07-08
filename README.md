@@ -15,7 +15,7 @@ npm install
 npm run dev
 ```
 
-The local default API key is `demo-key`.
+The local default API key is `local-scribe-key`.
 
 ```bash
 curl http://localhost:3000/health
@@ -27,7 +27,7 @@ Preview the EFS plan for a write:
 ```bash
 curl -X POST http://localhost:3000/v1/files/plan \
   -H 'content-type: application/json' \
-  -H 'authorization: Bearer demo-key' \
+  -H 'authorization: Bearer local-scribe-key' \
   -d '{
     "path": "/agents/demo/status.json",
     "content": {
@@ -53,7 +53,7 @@ Write a small JSON file in offline mode:
 ```bash
 curl -X POST http://localhost:3000/v1/files \
   -H 'content-type: application/json' \
-  -H 'authorization: Bearer demo-key' \
+  -H 'authorization: Bearer local-scribe-key' \
   -d '{
     "path": "/agents/demo/status.json",
     "content": {
@@ -105,7 +105,7 @@ SERVICE_SPONSOR_PRIVATE_KEY=<private key with Sepolia ETH>
 
 If derived agent wallets are funded another way, set
 `SEPOLIA_AGENT_FUNDING_TARGET_WEI=0` and omit `SERVICE_SPONSOR_PRIVATE_KEY`.
-The sample `demo-key` is rejected in Sepolia mode.
+The sample `local-scribe-key` is rejected in Sepolia mode.
 
 Receipt lookup is currently memory-only. On-chain writes remain on Sepolia, but
 `GET /v1/receipts/:id` and `GET /v1/resolve` only know receipts created since

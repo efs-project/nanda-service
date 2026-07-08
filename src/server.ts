@@ -30,15 +30,16 @@ function createWriter(config: AppConfig): EfsWriter {
   if (!config.sepolia.ready) {
     throw new Error(`Sepolia writer requires: ${config.sepolia.missing.join(", ")}`);
   }
-  assertNoDemoAuthInSepolia(config);
+  assertNoSampleAuthInSepolia(config);
   return createSepoliaEfsWriter(config);
 }
 
-function assertNoDemoAuthInSepolia(config: AppConfig): void {
+function assertNoSampleAuthInSepolia(config: AppConfig): void {
   const parsed = JSON.parse(config.apiKeysJson) as Record<string, unknown>;
   for (const [apiKey, subject] of Object.entries(parsed)) {
-    if (apiKey === "demo-key" || subject === "api-key:demo-agent") {
-      throw new Error("Sepolia mode requires deployment API keys; replace the demo API key first");
+    const isCurrentSample = apiKey === "local-scribe-key" || subject === "api-key:local-scribe-agent";
+    if (isCurrentSample) {
+      throw new Error("Sepolia mode requires deployment API keys; replace the sample API key first");
     }
   }
 }

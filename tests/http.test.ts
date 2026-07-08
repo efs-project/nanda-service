@@ -28,7 +28,7 @@ describe("HTTP API", () => {
     await expect(
       buildApp({
         mode: "sepolia",
-        apiKeysJson: '{"demo-key":"api-key:demo-agent"}',
+        apiKeysJson: '{"local-scribe-key":"api-key:local-scribe-agent"}',
         derivationSecret: "unit-test-secret",
         publicBaseUrl: "http://localhost:3000",
         logLevel: "silent"
@@ -36,10 +36,10 @@ describe("HTTP API", () => {
     ).rejects.toThrow(/Sepolia writer requires/);
   });
 
-  it("rejects demo API keys in Sepolia mode", async () => {
+  it("rejects sample API keys in Sepolia mode", async () => {
     const config = parseEnv({
       EFS_SCRIBE_MODE: "sepolia",
-      API_KEYS_JSON: '{"demo-key":"api-key:demo-agent"}',
+      API_KEYS_JSON: '{"local-scribe-key":"api-key:local-scribe-agent"}',
       AGENT_KEY_DERIVATION_SECRET: "realistic-non-default-derivation-secret",
       PUBLIC_BASE_URL: "http://localhost:3000",
       PORT: "3000",
@@ -52,13 +52,13 @@ describe("HTTP API", () => {
       RECEIPT_SIGNER_PRIVATE_KEY: ""
     });
 
-    await expect(buildApp(config)).rejects.toThrow(/replace the demo API key/i);
+    await expect(buildApp(config)).rejects.toThrow(/replace the sample API key/i);
   });
 
   it("reports health, service links, and capabilities", async () => {
     const app = await buildApp({
       mode: "offline",
-      apiKeysJson: '{"demo-key":"api-key:demo-agent"}',
+      apiKeysJson: '{"local-scribe-key":"api-key:local-scribe-agent"}',
       derivationSecret: "unit-test-secret",
       publicBaseUrl: "http://localhost:3000",
       logLevel: "silent"
@@ -111,7 +111,7 @@ describe("HTTP API", () => {
   it("serves agent docs and a minimal OpenAPI document", async () => {
     const app = await buildApp({
       mode: "offline",
-      apiKeysJson: '{"demo-key":"api-key:demo-agent"}',
+      apiKeysJson: '{"local-scribe-key":"api-key:local-scribe-agent"}',
       derivationSecret: "unit-test-secret",
       publicBaseUrl: "http://localhost:3000",
       logLevel: "silent"
@@ -147,7 +147,7 @@ describe("HTTP API", () => {
   it("requires auth for file writes", async () => {
     const app = await buildApp({
       mode: "offline",
-      apiKeysJson: '{"demo-key":"api-key:demo-agent"}',
+      apiKeysJson: '{"local-scribe-key":"api-key:local-scribe-agent"}',
       derivationSecret: "unit-test-secret",
       publicBaseUrl: "http://localhost:3000",
       logLevel: "silent"
@@ -168,7 +168,7 @@ describe("HTTP API", () => {
   it("writes and verifies an offline receipt", async () => {
     const app = await buildApp({
       mode: "offline",
-      apiKeysJson: '{"demo-key":"api-key:demo-agent"}',
+      apiKeysJson: '{"local-scribe-key":"api-key:local-scribe-agent"}',
       derivationSecret: "unit-test-secret",
       publicBaseUrl: "http://localhost:3000",
       logLevel: "silent"
@@ -177,7 +177,7 @@ describe("HTTP API", () => {
     const write = await app.inject({
       method: "POST",
       url: "/v1/files",
-      headers: { authorization: "Bearer demo-key" },
+      headers: { authorization: "Bearer local-scribe-key" },
       payload: writeBody
     });
 
@@ -201,7 +201,7 @@ describe("HTTP API", () => {
   it("previews an EFS file plan without storing a receipt", async () => {
     const app = await buildApp({
       mode: "offline",
-      apiKeysJson: '{"demo-key":"api-key:demo-agent"}',
+      apiKeysJson: '{"local-scribe-key":"api-key:local-scribe-agent"}',
       derivationSecret: "unit-test-secret",
       publicBaseUrl: "http://localhost:3000",
       logLevel: "silent"
@@ -210,7 +210,7 @@ describe("HTTP API", () => {
     const plan = await app.inject({
       method: "POST",
       url: "/v1/files/plan",
-      headers: { authorization: "Bearer demo-key" },
+      headers: { authorization: "Bearer local-scribe-key" },
       payload: writeBody
     });
 
@@ -242,7 +242,7 @@ describe("HTTP API", () => {
   it("treats dry_run file writes as non-persistent plan previews", async () => {
     const app = await buildApp({
       mode: "offline",
-      apiKeysJson: '{"demo-key":"api-key:demo-agent"}',
+      apiKeysJson: '{"local-scribe-key":"api-key:local-scribe-agent"}',
       derivationSecret: "unit-test-secret",
       publicBaseUrl: "http://localhost:3000",
       logLevel: "silent"
@@ -251,7 +251,7 @@ describe("HTTP API", () => {
     const dryRun = await app.inject({
       method: "POST",
       url: "/v1/files",
-      headers: { authorization: "Bearer demo-key" },
+      headers: { authorization: "Bearer local-scribe-key" },
       payload: {
         ...writeBody,
         options: { ...writeBody.options, dry_run: true }
@@ -280,7 +280,7 @@ describe("HTTP API", () => {
   it("stores receipts and returns idempotent retries", async () => {
     const app = await buildApp({
       mode: "offline",
-      apiKeysJson: '{"demo-key":"api-key:demo-agent"}',
+      apiKeysJson: '{"local-scribe-key":"api-key:local-scribe-agent"}',
       derivationSecret: "unit-test-secret",
       publicBaseUrl: "http://localhost:3000",
       logLevel: "silent"
@@ -289,13 +289,13 @@ describe("HTTP API", () => {
     const first = await app.inject({
       method: "POST",
       url: "/v1/files",
-      headers: { authorization: "Bearer demo-key" },
+      headers: { authorization: "Bearer local-scribe-key" },
       payload: writeBody
     });
     const retry = await app.inject({
       method: "POST",
       url: "/v1/files",
-      headers: { authorization: "Bearer demo-key" },
+      headers: { authorization: "Bearer local-scribe-key" },
       payload: writeBody
     });
 
@@ -317,7 +317,7 @@ describe("HTTP API", () => {
   it("rejects idempotency key reuse for a different request", async () => {
     const app = await buildApp({
       mode: "offline",
-      apiKeysJson: '{"demo-key":"api-key:demo-agent"}',
+      apiKeysJson: '{"local-scribe-key":"api-key:local-scribe-agent"}',
       derivationSecret: "unit-test-secret",
       publicBaseUrl: "http://localhost:3000",
       logLevel: "silent"
@@ -326,13 +326,13 @@ describe("HTTP API", () => {
     const first = await app.inject({
       method: "POST",
       url: "/v1/files",
-      headers: { authorization: "Bearer demo-key" },
+      headers: { authorization: "Bearer local-scribe-key" },
       payload: writeBody
     });
     const conflict = await app.inject({
       method: "POST",
       url: "/v1/files",
-      headers: { authorization: "Bearer demo-key" },
+      headers: { authorization: "Bearer local-scribe-key" },
       payload: {
         ...writeBody,
         path: "/agents/demo/other.json"
@@ -349,7 +349,7 @@ describe("HTTP API", () => {
   it("resolves the latest stored receipt by path", async () => {
     const app = await buildApp({
       mode: "offline",
-      apiKeysJson: '{"demo-key":"api-key:demo-agent"}',
+      apiKeysJson: '{"local-scribe-key":"api-key:local-scribe-agent"}',
       derivationSecret: "unit-test-secret",
       publicBaseUrl: "http://localhost:3000",
       logLevel: "silent"
@@ -358,7 +358,7 @@ describe("HTTP API", () => {
     const write = await app.inject({
       method: "POST",
       url: "/v1/files",
-      headers: { authorization: "Bearer demo-key" },
+      headers: { authorization: "Bearer local-scribe-key" },
       payload: writeBody
     });
     const receipt = write.json().receipt;
@@ -383,7 +383,7 @@ describe("HTTP API", () => {
   it("returns 404 for missing receipts and unresolved paths", async () => {
     const app = await buildApp({
       mode: "offline",
-      apiKeysJson: '{"demo-key":"api-key:demo-agent"}',
+      apiKeysJson: '{"local-scribe-key":"api-key:local-scribe-agent"}',
       derivationSecret: "unit-test-secret",
       publicBaseUrl: "http://localhost:3000",
       logLevel: "silent"
@@ -409,7 +409,7 @@ describe("HTTP API", () => {
   it("returns 400 for invalid resolve paths", async () => {
     const app = await buildApp({
       mode: "offline",
-      apiKeysJson: '{"demo-key":"api-key:demo-agent"}',
+      apiKeysJson: '{"local-scribe-key":"api-key:local-scribe-agent"}',
       derivationSecret: "unit-test-secret",
       publicBaseUrl: "http://localhost:3000",
       logLevel: "silent"

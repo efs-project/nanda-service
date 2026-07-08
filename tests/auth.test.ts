@@ -6,26 +6,26 @@ import { canonicalSubject } from "../src/auth/subject.js";
 
 describe("canonicalSubject", () => {
   it("normalizes authenticated subjects without using display IDs", () => {
-    expect(canonicalSubject(" API-Key:Demo-Agent ")).toBe("api-key:demo-agent");
+    expect(canonicalSubject(" API-Key:Local-Scribe-Agent ")).toBe("api-key:local-scribe-agent");
   });
 });
 
 describe("authenticateApiKey", () => {
   it("maps API keys to authenticated subjects", () => {
-    const keys = parseApiKeys('{"demo-key":"api-key:demo-agent"}');
+    const keys = parseApiKeys('{"local-scribe-key":"api-key:local-scribe-agent"}');
 
-    const auth = authenticateApiKey("demo-key", keys, "agent:claimed-demo");
+    const auth = authenticateApiKey("local-scribe-key", keys, "agent:claimed-demo");
 
     expect(auth).toEqual({
       method: "api_key",
-      authenticated_subject: "api-key:demo-agent",
+      authenticated_subject: "api-key:local-scribe-agent",
       claimed_nanda_id: "agent:claimed-demo",
       auth_level: "write_key"
     });
   });
 
   it("rejects unknown API keys", () => {
-    const keys = parseApiKeys('{"demo-key":"api-key:demo-agent"}');
+    const keys = parseApiKeys('{"local-scribe-key":"api-key:local-scribe-agent"}');
 
     expect(() => authenticateApiKey("wrong-key", keys)).toThrow(/Invalid API key/);
   });
@@ -34,12 +34,12 @@ describe("authenticateApiKey", () => {
 describe("deriveAttester", () => {
   it("derives stable hidden wallet addresses from authenticated subjects", () => {
     const first = deriveAttester({
-      subject: "api-key:demo-agent",
+      subject: "api-key:local-scribe-agent",
       secret: "unit-test-secret",
       chainId: 11155111
     });
     const second = deriveAttester({
-      subject: "api-key:demo-agent",
+      subject: "api-key:local-scribe-agent",
       secret: "unit-test-secret",
       chainId: 11155111
     });

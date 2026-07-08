@@ -7,7 +7,7 @@ import { buildFileWritePlan, normalizeEfsPath } from "../src/efs/write-plan.js";
 
 const auth: AuthContext = {
   method: "api_key",
-  authenticated_subject: "api-key:demo-agent",
+  authenticated_subject: "api-key:local-scribe-agent",
   claimed_nanda_id: "agent:demo",
   auth_level: "write_key"
 };

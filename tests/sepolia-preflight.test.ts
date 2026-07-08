@@ -11,7 +11,7 @@ const ZERO_UID = `0x${"0".repeat(64)}` as const;
 
 const auth: AuthContext = {
   method: "api_key",
-  authenticated_subject: "api-key:demo-agent",
+  authenticated_subject: "api-key:local-scribe-agent",
   claimed_nanda_id: "agent:demo",
   auth_level: "write_key"
 };

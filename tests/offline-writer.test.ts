@@ -26,7 +26,7 @@ const request = {
 function contextFor(apiKey: string) {
   const auth = authenticateApiKey(
     apiKey,
-    parseApiKeys('{"demo-key":"api-key:demo-agent","other-key":"api-key:other-agent"}'),
+    parseApiKeys('{"local-scribe-key":"api-key:local-scribe-agent","other-key":"api-key:other-agent"}'),
     request.agent.claimed_nanda_id
   );
   const attester = deriveAttester({
@@ -40,8 +40,8 @@ function contextFor(apiKey: string) {
 describe("OfflineEfsWriter", () => {
   it("creates deterministic receipts for identical writes", async () => {
     const writer = new OfflineEfsWriter({ now: () => new Date("2026-07-08T00:00:00Z") });
-    const first = await writer.writeFile(request, contextFor("demo-key"));
-    const second = await writer.writeFile(request, contextFor("demo-key"));
+    const first = await writer.writeFile(request, contextFor("local-scribe-key"));
+    const second = await writer.writeFile(request, contextFor("local-scribe-key"));
 
     expect(first).toEqual(second);
     expect(first.mode).toBe("offline");
@@ -51,7 +51,7 @@ describe("OfflineEfsWriter", () => {
 
   it("changes the data uid when payload bytes change", async () => {
     const writer = new OfflineEfsWriter({ now: () => new Date("2026-07-08T00:00:00Z") });
-    const first = await writer.writeFile(request, contextFor("demo-key"));
+    const first = await writer.writeFile(request, contextFor("local-scribe-key"));
     const changed = await writer.writeFile(
       {
         ...request,
@@ -60,7 +60,7 @@ describe("OfflineEfsWriter", () => {
           content_base64: Buffer.from('{"ok":false}', "utf8").toString("base64")
         }
       },
-      contextFor("demo-key")
+      contextFor("local-scribe-key")
     );
 
     expect(first.efs.uids.data).not.toBe(changed.efs.uids.data);
@@ -68,7 +68,7 @@ describe("OfflineEfsWriter", () => {
 
   it("changes the lens when authenticated subject changes", async () => {
     const writer = new OfflineEfsWriter({ now: () => new Date("2026-07-08T00:00:00Z") });
-    const first = await writer.writeFile(request, contextFor("demo-key"));
+    const first = await writer.writeFile(request, contextFor("local-scribe-key"));
     const other = await writer.writeFile(request, contextFor("other-key"));
 
     expect(first.auth.claimed_nanda_id).toBe(other.auth.claimed_nanda_id);
@@ -78,7 +78,7 @@ describe("OfflineEfsWriter", () => {
 
   it("verifies offline receipts with explicit checks", async () => {
     const writer = new OfflineEfsWriter({ now: () => new Date("2026-07-08T00:00:00Z") });
-    const receipt = await writer.writeFile(request, contextFor("demo-key"));
+    const receipt = await writer.writeFile(request, contextFor("local-scribe-key"));
     const verification = await writer.verifyReceipt(receipt);
 
     expect(verification.ok).toBe(true);

@@ -13,7 +13,7 @@ describe("ReceiptSchema", () => {
       created_at: "2026-07-08T00:00:00.000Z",
       auth: {
         method: "api_key",
-        authenticated_subject: "api-key:demo-agent",
+        authenticated_subject: "api-key:local-scribe-agent",
         claimed_nanda_id: "agent:demo",
         auth_level: "write_key"
       },
