@@ -1,0 +1,15 @@
+import type { Hex } from "viem";
+
+export const SEPOLIA_CHAIN_ID = 11155111;
+export const SEPOLIA_EAS_ADDRESS = "0xC2679fBD37d54388Ce493F1DB75320D236e1815e" as const;
+
+export const EFS_SCHEMA_UIDS = {
+  ANCHOR: "0xf818abd74da70345c8acd7087e6ce69fd48eaf4e79c1931e5c6b08fb148c921a",
+  PROPERTY: "0xa1f54f2d395c24077e374d9a2d835a2d2fcb3b4c3e019f63525bee3424f1c246",
+  DATA: "0xa3400cecc384d66d84f502fd91e56dc0321edccde9ef8e49d303ba63cc841b3c",
+  PIN: "0x5aaabaea19accff34c604f6f1b0dd2361a0a9ba64f7746ea6b3ed95d4047d878",
+  TAG: "0x0c41f8ee209fdbea4de3942c488a4098dd5a8bb1afce117857c5493002dd0e87",
+  MIRROR: "0x9573ea8100bda88cc09ba275d8307b309c42ae82cca7f96ccf0e3eef4b5ea58d",
+  LIST: "0x2e2801910184228802919fcc6f20c7e6c9e9c12fb8ae7a1f4e516cd3eeec6a59",
+  LIST_ENTRY: "0x9a22c62bf63ef3a04412c124747df97d9f9e81376fa202d4ed514d0a5e6c9af1"
+} as const satisfies Record<string, Hex>;
