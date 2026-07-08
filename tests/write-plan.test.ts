@@ -70,12 +70,7 @@ describe("buildFileWritePlan", () => {
     expect(refs.get("data")?.schema).toBe(EFS_SCHEMA_UIDS.DATA);
     expect(refs.get("anchor:/agents/demo/status.json")?.schema).toBe(EFS_SCHEMA_UIDS.ANCHOR);
     expect(refs.get("placement.pin")?.schema).toBe(EFS_SCHEMA_UIDS.PIN);
-    expect(refs.get("mirror.0")?.fields).toMatchObject({
-      transport: "data",
-      uri: `data:application/json;base64,${Buffer.from('{"ok":true}', "utf8").toString("base64")}`
-    });
     expect(refs.get("mirror.0")?.schema).toBe(EFS_SCHEMA_UIDS.MIRROR);
-    expect(refs.get("mirror.1")?.schema).toBe(EFS_SCHEMA_UIDS.MIRROR);
     expect(refs.get("property:contentHash.pin")?.schema).toBe(EFS_SCHEMA_UIDS.PIN);
     expect(refs.get("property:name.pin")?.schema).toBe(EFS_SCHEMA_UIDS.PIN);
     expect(refs.get("property:schema.pin")?.schema).toBe(EFS_SCHEMA_UIDS.PIN);
@@ -91,7 +86,7 @@ describe("buildFileWritePlan", () => {
       definition: { ref: "anchor:/agents/demo/status.json" }
     });
     expect(refs.get("anchor:/agents")?.refUID).toEqual({ external: "efs.rootAnchorUID" });
-    expect(refs.get("mirror.1")?.fields).toMatchObject({
+    expect(refs.get("mirror.0")?.fields).toMatchObject({
       transport: "https",
       transportDefinition: { external: "efs.transport.https" }
     });
@@ -104,11 +99,6 @@ describe("buildFileWritePlan", () => {
         expect.objectContaining({
           kind: "path_anchor",
           path: "/agents"
-        }),
-        expect.objectContaining({
-          kind: "transport_anchor",
-          ref: "efs.transport.data",
-          path: "/transports/data"
         }),
         expect.objectContaining({
           kind: "transport_anchor",

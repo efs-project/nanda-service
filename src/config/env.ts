@@ -20,7 +20,7 @@ const EnvSchema = z.object({
     .regex(/^0x[0-9a-fA-F]{40}$/)
     .default(SEPOLIA_EAS_ADDRESS),
   SEPOLIA_RPC_URL: z.string().default(""),
-  SEPOLIA_AGENT_FUNDING_TARGET_WEI: z.string().default("1000000000000000"),
+  SEPOLIA_AGENT_FUNDING_TARGET_WEI: z.string().default("20000000000000000"),
   SERVICE_SPONSOR_PRIVATE_KEY: z.string().default(""),
   RECEIPT_SIGNER_PRIVATE_KEY: z.string().default("")
 });

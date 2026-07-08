@@ -43,9 +43,10 @@ curl -X POST http://localhost:3000/v1/files/plan \
 
 The plan includes a `preflight` list naming Sepolia facts the chain writer
 resolves first, such as `rootAnchorUID`, existing path anchors, and
-`/transports/<name>` anchors. Small inline files are written as EFS `data:`
-MIRRORs; DATA itself is the EFS empty identity attestation, with `contentHash`,
-`contentType`, and `size` bound as PROPERTYs.
+`/transports/<name>` anchors. DATA itself is the EFS empty identity attestation,
+with `contentHash`, `contentType`, and `size` bound as PROPERTYs. Retrievable
+bytes should be supplied through explicit mirrors such as `https` or `ipfs`;
+`inline_base64` is used to compute the content facts.
 
 Write a small JSON file in offline mode:
 
@@ -115,8 +116,8 @@ is what controls the derived EFS attester lens.
 
 ## Limits
 
-- Inline files are limited to 4096 decoded bytes and are published as `data:`
-  MIRRORs.
+- Inline files are limited to 4096 decoded bytes and are used to compute
+  content facts. Add explicit mirrors when the bytes should be retrievable.
 - Larger files should use `hash_only` or `external_mirror_only` with one or more
   mirrors.
 - A request can include up to 8 mirrors and 32 properties.

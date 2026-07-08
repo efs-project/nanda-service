@@ -95,7 +95,7 @@ describe("HTTP API", () => {
           "SERVICE_SPONSOR_PRIVATE_KEY",
           "AGENT_KEY_DERIVATION_SECRET"
         ],
-        agent_funding_target_wei: "1000000000000000"
+        agent_funding_target_wei: "20000000000000000"
       },
       efs: {
         sepolia: { chainId: 11155111 },

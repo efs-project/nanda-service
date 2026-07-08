@@ -47,7 +47,7 @@ describe("parseEnv", () => {
       missing: [],
       rpcUrl: "https://sepolia.example.test/rpc",
       easAddress: EFS_SEPOLIA.eas,
-      agentFundingTargetWei: 1_000_000_000_000_000n
+      agentFundingTargetWei: 20_000_000_000_000_000n
     });
   });
 

@@ -142,15 +142,22 @@ export class SepoliaEfsWriter implements EfsWriter {
         continue;
       }
 
-      const txHash = await walletClient.writeContract({
-        account: agentAccount,
-        address: this.easAddress,
-        abi: EAS_MULTIATTEST_ABI,
-        functionName: "multiAttest",
-        args: [layerRequests.requests],
-        value: 0n,
-        chain: sepolia
-      });
+      let txHash: Hex;
+      try {
+        txHash = await walletClient.writeContract({
+          account: agentAccount,
+          address: this.easAddress,
+          abi: EAS_MULTIATTEST_ABI,
+          functionName: "multiAttest",
+          args: [layerRequests.requests],
+          value: 0n,
+          chain: sepolia
+        });
+      } catch (error) {
+        throw new SepoliaSubmitError(
+          `Sepolia EAS multiAttest transaction was not sent: ${errorMessage(error)}`
+        );
+      }
       const receipt = await this.confirmTransaction(txHash, "Sepolia EAS multiAttest");
       const events = extractAttestedEventsFromLogs(
         receipt.logs,
@@ -271,12 +278,19 @@ export class SepoliaEfsWriter implements EfsWriter {
     }
 
     const value = this.agentFundingTargetWei - balance;
-    const txHash = await this.sponsorWallet.sendTransaction({
-      account: this.sponsorAccount,
-      chain: sepolia,
-      to: context.attester.address,
-      value
-    });
+    let txHash: Hex;
+    try {
+      txHash = await this.sponsorWallet.sendTransaction({
+        account: this.sponsorAccount,
+        chain: sepolia,
+        to: context.attester.address,
+        value
+      });
+    } catch (error) {
+      throw new SepoliaSubmitError(
+        `Sepolia agent wallet funding transaction was not sent: ${errorMessage(error)}`
+      );
+    }
     await this.confirmTransaction(txHash, "Sepolia agent wallet funding");
   }
 
@@ -409,4 +423,17 @@ function toSafeBlockNumber(blockNumber: bigint | null): number {
     throw new SepoliaSubmitError("Sepolia receipt block number cannot be represented safely");
   }
   return Number(blockNumber);
+}
+
+function errorMessage(error: unknown): string {
+  if (error !== null && typeof error === "object") {
+    const record = error as { shortMessage?: unknown; message?: unknown };
+    if (typeof record.shortMessage === "string") {
+      return record.shortMessage;
+    }
+    if (typeof record.message === "string") {
+      return record.message;
+    }
+  }
+  return String(error);
 }

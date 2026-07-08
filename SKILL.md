@@ -86,9 +86,9 @@ curl -X POST http://localhost:3000/v1/files \
 
 The response contains `receipt`. Keep that whole object.
 
-For `inline_base64` content, files up to 4096 decoded bytes are published as an
-EFS `data:` MIRROR. Larger files should use `hash_only` or
-`external_mirror_only` plus explicit mirrors.
+For `inline_base64` content, files up to 4096 decoded bytes are used to compute
+content facts. Add explicit mirrors such as `https` or `ipfs` when the bytes
+should be retrievable.
 
 To preview without storing a receipt, use `POST /v1/files/plan` or include
 `"dry_run": true` in `options`.

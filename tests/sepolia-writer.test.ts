@@ -11,7 +11,7 @@ import { deriveAttester } from "../src/auth/derived-attester.js";
 import type { AuthContext } from "../src/auth/subject.js";
 import { EFS_SCHEMA_UIDS, EFS_SEPOLIA } from "../src/config/chains.js";
 import { EAS_ATTESTED_EVENT } from "../src/efs/eas-requests.js";
-import { SepoliaEfsWriter } from "../src/efs/sepolia-writer.js";
+import { SepoliaEfsWriter, SepoliaSubmitError } from "../src/efs/sepolia-writer.js";
 import type { Hex, Uid } from "../src/efs/writer.js";
 
 const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000" as const;
@@ -41,14 +41,12 @@ describe("SepoliaEfsWriter", () => {
     const demo = uid(3);
     const transports = uid(4);
     const https = uid(5);
-    const dataTransport = uid(6);
     const publicClient = new FakeSepoliaPublicClient(root, {
       [pathKey(root, "agents")]: agents,
       [pathKey(agents, "demo")]: demo,
       [anchorKey(demo, "status.json", EFS_SCHEMA_UIDS.DATA)]: ZERO_UID,
       [pathKey(root, "transports")]: transports,
-      [pathKey(transports, "https")]: https,
-      [pathKey(transports, "data")]: dataTransport
+      [pathKey(transports, "https")]: https
     });
     const sponsorWallet = new FakeSepoliaWallet(publicClient);
     const agentWallet = new FakeSepoliaWallet(publicClient);
@@ -84,7 +82,7 @@ describe("SepoliaEfsWriter", () => {
     expect(agentWallet.contractWrites.every((write) => write.account?.address === context.attester.address)).toBe(
       true
     );
-    expect(agentWallet.contractWrites.map((write) => attestationCount(write))).toEqual([5, 6, 5, 1]);
+    expect(agentWallet.contractWrites.map((write) => attestationCount(write))).toEqual([5, 5, 5, 1]);
     expect(receipt).toMatchObject({
       status: "confirmed",
       mode: "sepolia",
@@ -105,7 +103,7 @@ describe("SepoliaEfsWriter", () => {
     expect(receipt.efs.uids.data).toMatch(/^0x[0-9a-f]{64}$/);
     expect(receipt.efs.uids.file_anchor).toMatch(/^0x[0-9a-f]{64}$/);
     expect(receipt.efs.uids.placement_pin).toMatch(/^0x[0-9a-f]{64}$/);
-    expect(receipt.efs.uids.mirrors).toHaveLength(2);
+    expect(receipt.efs.uids.mirrors).toHaveLength(1);
     expect(Object.keys(receipt.efs.uids.properties).sort()).toEqual([
       "contentHash",
       "contentType",
@@ -152,6 +150,40 @@ describe("SepoliaEfsWriter", () => {
     expect(agentWallet.contractWrites.map((write) => attestationCount(write))).toEqual([2, 1, 1, 1]);
     expect(receipt.efs.uids.file_anchor).toBe(fileAnchor);
     expect(receipt.efs.uids.placement_pin).toMatch(/^0x[0-9a-f]{64}$/);
+  });
+
+  it("classifies pre-send viem failures as Sepolia submit errors", async () => {
+    const root = uid(21);
+    const agents = uid(22);
+    const demo = uid(23);
+    const publicClient = new FakeSepoliaPublicClient(root, {
+      [pathKey(root, "agents")]: agents,
+      [pathKey(agents, "demo")]: demo,
+      [anchorKey(demo, "status.json", EFS_SCHEMA_UIDS.DATA)]: ZERO_UID
+    });
+    const writer = new SepoliaEfsWriter({
+      chainId: 11155111,
+      easAddress: EFS_SEPOLIA.eas,
+      indexerAddress: EFS_SEPOLIA.indexer,
+      publicClient,
+      walletClientFactory: () => new FailingSepoliaWallet(),
+      agentFundingTargetWei: 0n,
+      now: () => new Date("2026-07-08T00:00:00Z")
+    });
+
+    await expect(
+      writer.writeFile(
+        {
+          path: "/agents/demo/status.json",
+          content: {
+            mode: "hash_only",
+            payload_sha256:
+              "sha256:43258cff783fe7036d8a43033f830adfc60ec037382473548ac742b888292777"
+          }
+        },
+        context
+      )
+    ).rejects.toThrow(SepoliaSubmitError);
   });
 });
 
@@ -239,6 +271,12 @@ class FakeSepoliaWallet {
     const hash = uid(10000 + this.txCount++);
     this.publicClient.registerWrite(hash, attestationSchemas(args));
     return hash;
+  }
+}
+
+class FailingSepoliaWallet {
+  async writeContract(): Promise<Hex> {
+    throw new Error("execution reverted");
   }
 }
 
