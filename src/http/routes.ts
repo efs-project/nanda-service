@@ -89,34 +89,153 @@ export async function registerRoutes(
       "/v1/files/plan": {
         post: {
           summary: "Preview an EFS file write plan",
-          security: [{ bearerAuth: [] }]
+          security: [{ bearerAuth: [] }],
+          requestBody: {
+            required: true,
+            content: {
+              "application/json": {
+                schema: { $ref: "#/components/schemas/FileWriteRequest" }
+              }
+            }
+          }
         }
       },
       "/v1/files": {
         post: {
           summary: "Write an EFS file record",
-          security: [{ bearerAuth: [] }]
+          security: [{ bearerAuth: [] }],
+          requestBody: {
+            required: true,
+            content: {
+              "application/json": {
+                schema: { $ref: "#/components/schemas/FileWriteRequest" }
+              }
+            }
+          },
+          responses: {
+            "200": {
+              description: "Receipt for the EFS write",
+              content: {
+                "application/json": {
+                  schema: { $ref: "#/components/schemas/FileWriteResponse" }
+                }
+              }
+            }
+          }
         }
       },
       "/v1/receipts/{receiptId}": { get: { summary: "Fetch a stored receipt" } },
       "/v1/resolve": { get: { summary: "Resolve the latest stored receipt by path" } },
-      "/v1/verify": { post: { summary: "Verify an EFS Scribe receipt" } }
+      "/v1/verify": {
+        post: {
+          summary: "Verify an EFS Scribe receipt",
+          description:
+            "Checks receipt shape and self-consistency. This is not an independent Sepolia indexer.",
+          requestBody: {
+            required: true,
+            content: {
+              "application/json": {
+                schema: { $ref: "#/components/schemas/VerifyReceiptRequest" }
+              }
+            }
+          }
+        }
+      }
     },
     components: {
       securitySchemes: {
         bearerAuth: { type: "http", scheme: "bearer" }
       },
       schemas: {
+        InlineContent: {
+          type: "object",
+          required: ["mode", "content_base64", "content_type"],
+          properties: {
+            mode: { const: "inline_base64" },
+            content_base64: { type: "string", example: "eyJvayI6dHJ1ZX0=" },
+            content_type: { type: "string", example: "application/json" }
+          }
+        },
+        HashOnlyContent: {
+          type: "object",
+          required: ["mode", "payload_sha256"],
+          properties: {
+            mode: { const: "hash_only" },
+            payload_sha256: {
+              type: "string",
+              example: "sha256:2689367b205c16ce32b480e6f8ebbb8a9f044d455c6ddfb140bfd6a500933602"
+            },
+            size_bytes: { type: "integer", minimum: 0 },
+            content_type: { type: "string", example: "application/json" }
+          }
+        },
+        ExternalMirrorOnlyContent: {
+          type: "object",
+          required: ["mode", "payload_sha256"],
+          properties: {
+            mode: { const: "external_mirror_only" },
+            payload_sha256: {
+              type: "string",
+              example: "sha256:2689367b205c16ce32b480e6f8ebbb8a9f044d455c6ddfb140bfd6a500933602"
+            },
+            content_type: { type: "string", example: "application/json" }
+          }
+        },
+        Mirror: {
+          type: "object",
+          required: ["transport", "uri"],
+          properties: {
+            transport: { type: "string", enum: ["https", "ipfs", "arweave", "data"] },
+            uri: { type: "string", example: "https://example.com/status.json" }
+          }
+        },
         FileWriteRequest: {
           type: "object",
           required: ["path", "content"],
           properties: {
             path: { type: "string", example: "/agents/demo/status.json" },
-            content: { type: "object" },
-            mirrors: { type: "array", items: { type: "object" } },
+            content: {
+              oneOf: [
+                { $ref: "#/components/schemas/InlineContent" },
+                { $ref: "#/components/schemas/HashOnlyContent" },
+                { $ref: "#/components/schemas/ExternalMirrorOnlyContent" }
+              ]
+            },
+            mirrors: {
+              type: "array",
+              maxItems: 8,
+              items: { $ref: "#/components/schemas/Mirror" }
+            },
             properties: { type: "object", additionalProperties: { type: "string" } },
-            agent: { type: "object" },
-            options: { type: "object" }
+            agent: {
+              type: "object",
+              properties: {
+                claimed_nanda_id: { type: "string", example: "agent:demo" },
+                label: { type: "string" }
+              }
+            },
+            options: {
+              type: "object",
+              properties: {
+                dry_run: { type: "boolean", default: false },
+                idempotency_key: { type: "string", maxLength: 128 }
+              }
+            }
+          }
+        },
+        FileWriteResponse: {
+          type: "object",
+          required: ["receipt", "links"],
+          properties: {
+            receipt: { type: "object", description: "EFS Scribe receipt object" },
+            links: { type: "object", additionalProperties: { type: "string" } }
+          }
+        },
+        VerifyReceiptRequest: {
+          type: "object",
+          required: ["receipt"],
+          properties: {
+            receipt: { type: "object", description: "Receipt returned by POST /v1/files" }
           }
         }
       }

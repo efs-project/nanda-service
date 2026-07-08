@@ -123,6 +123,7 @@ describe("HTTP API", () => {
     expect(skill.statusCode).toBe(200);
     expect(skill.headers["content-type"]).toContain("text/markdown");
     expect(skill.body).toContain("EFS Scribe");
+    expect(skill.body).toContain("https://efs-scribe-production.up.railway.app");
     expect(openapi.statusCode).toBe(200);
     expect(openapi.json()).toMatchObject({
       openapi: "3.1.0",
@@ -130,13 +131,45 @@ describe("HTTP API", () => {
       paths: {
         "/v1/files/plan": {
           post: {
-            summary: "Preview an EFS file write plan"
+            summary: "Preview an EFS file write plan",
+            requestBody: {
+              content: {
+                "application/json": {
+                  schema: { $ref: "#/components/schemas/FileWriteRequest" }
+                }
+              }
+            }
+          }
+        },
+        "/v1/verify": {
+          post: {
+            description:
+              "Checks receipt shape and self-consistency. This is not an independent Sepolia indexer."
           }
         }
       },
       components: {
         securitySchemes: {
           bearerAuth: { type: "http", scheme: "bearer" }
+        },
+        schemas: {
+          FileWriteRequest: {
+            properties: {
+              content: {
+                oneOf: [
+                  { $ref: "#/components/schemas/InlineContent" },
+                  { $ref: "#/components/schemas/HashOnlyContent" },
+                  { $ref: "#/components/schemas/ExternalMirrorOnlyContent" }
+                ]
+              },
+              mirrors: {
+                items: { $ref: "#/components/schemas/Mirror" }
+              }
+            }
+          },
+          VerifyReceiptRequest: {
+            required: ["receipt"]
+          }
         }
       }
     });

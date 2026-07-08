@@ -7,8 +7,11 @@ path, or verify an EFS Scribe receipt.
 Base URL:
 
 ```text
-http://localhost:3000
+https://efs-scribe-production.up.railway.app
 ```
+
+If you are running EFS Scribe locally, replace the base URL with
+`http://localhost:3000`.
 
 Authentication:
 
@@ -25,13 +28,13 @@ EFS attestations to EAS after resolving existing path and transport anchors.
 ## Check Capabilities
 
 ```bash
-curl http://localhost:3000/v1/capabilities
+curl https://efs-scribe-production.up.railway.app/v1/capabilities
 ```
 
 ## Preview A File Plan
 
 ```bash
-curl -X POST http://localhost:3000/v1/files/plan \
+curl -X POST https://efs-scribe-production.up.railway.app/v1/files/plan \
   -H 'content-type: application/json' \
   -H 'authorization: Bearer local-scribe-key' \
   -d '{
@@ -61,7 +64,7 @@ chain writer must resolve first. It does not store a receipt.
 ## Write A File
 
 ```bash
-curl -X POST http://localhost:3000/v1/files \
+curl -X POST https://efs-scribe-production.up.railway.app/v1/files \
   -H 'content-type: application/json' \
   -H 'authorization: Bearer local-scribe-key' \
   -d '{
@@ -96,13 +99,13 @@ To preview without storing a receipt, use `POST /v1/files/plan` or include
 ## Fetch A Receipt
 
 ```bash
-curl http://localhost:3000/v1/receipts/<receipt_id>
+curl https://efs-scribe-production.up.railway.app/v1/receipts/<receipt_id>
 ```
 
 ## Resolve A Path
 
 ```bash
-curl 'http://localhost:3000/v1/resolve?path=%2Fagents%2Fdemo%2Fstatus.json'
+curl 'https://efs-scribe-production.up.railway.app/v1/resolve?path=%2Fagents%2Fdemo%2Fstatus.json'
 ```
 
 The response returns the latest stored receipt ID, attester lens, payload hash,
@@ -115,14 +118,15 @@ started.
 ## Verify A Receipt
 
 ```bash
-curl -X POST http://localhost:3000/v1/verify \
+curl -X POST https://efs-scribe-production.up.railway.app/v1/verify \
   -H 'content-type: application/json' \
   -d '{"receipt": { "...": "paste the returned receipt object here" }}'
 ```
 
-Verification returns explicit checks. Offline verification is shape-only. A
-passing offline receipt includes checks such as `offline_receipt_shape`,
-`offline_data_uid`, and `offline_placement_pin_uid`.
+Verification returns explicit checks. In this MVP it verifies receipt shape and
+self-consistency; it is not an independent Sepolia indexer. A passing offline
+receipt includes checks such as `offline_receipt_shape`, `offline_data_uid`,
+and `offline_placement_pin_uid`.
 
 ## Limits
 

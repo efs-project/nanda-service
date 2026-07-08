@@ -99,9 +99,13 @@ Sepolia mode requires:
 EFS_SCRIBE_MODE=sepolia
 API_KEYS_JSON={"your-api-key":"api-key:your-agent"}
 AGENT_KEY_DERIVATION_SECRET=<random deployment secret>
+PUBLIC_BASE_URL=https://your-public-service.example
 SEPOLIA_RPC_URL=<rpc url>
 SERVICE_SPONSOR_PRIVATE_KEY=<private key with Sepolia ETH>
 ```
+
+On Railway, set `PUBLIC_BASE_URL` to the public Railway domain so receipt links
+point back to the hosted service instead of localhost.
 
 If derived agent wallets are funded another way, set
 `SEPOLIA_AGENT_FUNDING_TARGET_WEI=0` and omit `SERVICE_SPONSOR_PRIVATE_KEY`.
@@ -110,6 +114,9 @@ The sample `local-scribe-key` is rejected in Sepolia mode.
 Receipt lookup is currently memory-only. On-chain writes remain on Sepolia, but
 `GET /v1/receipts/:id` and `GET /v1/resolve` only know receipts created since
 the current service process started.
+
+`POST /v1/verify` checks receipt shape and self-consistency. It does not yet
+re-query Sepolia or act as an independent EAS indexer.
 
 `agent.claimed_nanda_id` is a label supplied by the caller. The API key subject
 is what controls the derived EFS attester lens.
