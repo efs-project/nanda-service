@@ -77,7 +77,7 @@ export function buildFileWritePlan(
   input: FileWriteRequestInput,
   context: WriterContext
 ): EfsWritePlan {
-  const parsed = FileWriteRequestSchema.parse(input);
+  const parsed = withInlineDataMirror(FileWriteRequestSchema.parse(input));
   const normalizedPath = normalizeEfsPath(parsed.path);
   const payloadHash = payloadSha256(parsed);
   const properties = normalizedProperties(parsed, payloadHash);
@@ -111,6 +111,22 @@ export function buildFileWritePlan(
       ...mirrorAttestations(parsed),
       placementPin(normalizedPath)
     ].sort((left, right) => left.layer - right.layer || left.ref.localeCompare(right.ref))
+  };
+}
+
+function withInlineDataMirror(input: FileWriteRequest): FileWriteRequest {
+  if (input.content.mode !== "inline_base64") {
+    return input;
+  }
+
+  const uri = `data:${input.content.content_type};base64,${input.content.content_base64}`;
+  if (input.mirrors.some((mirror) => mirror.transport === "data" && mirror.uri === uri)) {
+    return input;
+  }
+
+  return {
+    ...input,
+    mirrors: [{ transport: "data", uri }, ...input.mirrors]
   };
 }
 

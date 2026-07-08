@@ -2,12 +2,11 @@
 
 Agent-friendly EFS write receipts for local development and Sepolia demo work.
 
-EFS Scribe gives agents a simple HTTP API for publishing EFS-shaped file records,
+EFS Scribe gives agents a simple HTTP API for publishing EFS file records,
 previewing the EFS attestation plan, receiving receipts, resolving stored
-receipts by path, and verifying receipts later. The current implementation ships
-a deterministic `offline` writer for local development, tests, and Nanda
-Town-style simulation. The same API is being prepared for a Sepolia writer that
-records real EFS attestations.
+receipts by path, and verifying receipts later. It ships two modes:
+deterministic `offline` receipts for local development, and configured
+`sepolia` writes that submit real EAS `multiAttest` transactions.
 
 ## Quick Start
 
@@ -42,9 +41,11 @@ curl -X POST http://localhost:3000/v1/files/plan \
   }'
 ```
 
-The plan includes a `preflight` list naming Sepolia facts a real chain writer
-must resolve first, such as `rootAnchorUID`, existing path anchors, and
-`/transports/<name>` anchors.
+The plan includes a `preflight` list naming Sepolia facts the chain writer
+resolves first, such as `rootAnchorUID`, existing path anchors, and
+`/transports/<name>` anchors. Small inline files are written as EFS `data:`
+MIRRORs; DATA itself is the EFS empty identity attestation, with `contentHash`,
+`contentType`, and `size` bound as PROPERTYs.
 
 Write a small JSON file in offline mode:
 
@@ -85,20 +86,46 @@ curl 'http://localhost:3000/v1/resolve?path=%2Fagents%2Fdemo%2Fstatus.json'
 ## Modes
 
 - `offline`: deterministic mock EFS receipts. No network or wallet required.
-- `sepolia`: planned for the real Sepolia EFS writer. The server rejects this
-  mode until the writer is implemented.
+- `sepolia`: real Sepolia EFS writes through EAS `multiAttest`. The derived
+  per-agent wallet signs as the EAS attester, and the sponsor key can top that
+  wallet up with Sepolia ETH.
 
 Both modes use the same request and receipt shape.
 
-The codebase includes read-only Sepolia preflight helpers for resolving
-`rootAnchorUID`, path anchors, and `/transports/<name>` anchors before the real
-submitter sends EAS transactions.
+Sepolia mode requires:
+
+```bash
+EFS_SCRIBE_MODE=sepolia
+API_KEYS_JSON={"your-api-key":"api-key:your-agent"}
+AGENT_KEY_DERIVATION_SECRET=<random deployment secret>
+SEPOLIA_RPC_URL=<rpc url>
+SERVICE_SPONSOR_PRIVATE_KEY=<private key with Sepolia ETH>
+```
+
+If derived agent wallets are funded another way, set
+`SEPOLIA_AGENT_FUNDING_TARGET_WEI=0` and omit `SERVICE_SPONSOR_PRIVATE_KEY`.
+The sample `demo-key` is rejected in Sepolia mode.
+
+Receipt lookup is currently memory-only. On-chain writes remain on Sepolia, but
+`GET /v1/receipts/:id` and `GET /v1/resolve` only know receipts created since
+the current service process started.
+
+`agent.claimed_nanda_id` is a label supplied by the caller. The API key subject
+is what controls the derived EFS attester lens.
+
+## Limits
+
+- Inline files are limited to 4096 decoded bytes and are published as `data:`
+  MIRRORs.
+- Larger files should use `hash_only` or `external_mirror_only` with one or more
+  mirrors.
+- A request can include up to 8 mirrors and 32 properties.
 
 ## Safety
 
 Do not write secrets, private keys, personal data, or confidential URLs. EFS
-receipts are meant to be independently inspectable claims about content hashes
-and metadata, not private storage.
+records are public attestations about file identity, retrieval, and metadata,
+not private storage.
 
 ## Development
 

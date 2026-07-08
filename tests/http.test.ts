@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 
+import { EFS_SEPOLIA } from "../src/config/chains.js";
+import { parseEnv } from "../src/config/env.js";
 import { buildApp } from "../src/server.js";
 
 const writeBody = {
@@ -22,7 +24,7 @@ const writeBody = {
 };
 
 describe("HTTP API", () => {
-  it("rejects Sepolia mode until the Sepolia writer is implemented", async () => {
+  it("rejects Sepolia mode until required chain configuration is present", async () => {
     await expect(
       buildApp({
         mode: "sepolia",
@@ -31,7 +33,26 @@ describe("HTTP API", () => {
         publicBaseUrl: "http://localhost:3000",
         logLevel: "silent"
       })
-    ).rejects.toThrow(/Sepolia writer is not implemented/);
+    ).rejects.toThrow(/Sepolia writer requires/);
+  });
+
+  it("rejects demo API keys in Sepolia mode", async () => {
+    const config = parseEnv({
+      EFS_SCRIBE_MODE: "sepolia",
+      API_KEYS_JSON: '{"demo-key":"api-key:demo-agent"}',
+      AGENT_KEY_DERIVATION_SECRET: "realistic-non-default-derivation-secret",
+      PUBLIC_BASE_URL: "http://localhost:3000",
+      PORT: "3000",
+      LOG_LEVEL: "silent",
+      EFS_CHAIN_ID: "11155111",
+      EFS_EAS_ADDRESS: EFS_SEPOLIA.eas,
+      SEPOLIA_RPC_URL: "https://sepolia.example.test/rpc",
+      SEPOLIA_AGENT_FUNDING_TARGET_WEI: "0",
+      SERVICE_SPONSOR_PRIVATE_KEY: "",
+      RECEIPT_SIGNER_PRIVATE_KEY: ""
+    });
+
+    await expect(buildApp(config)).rejects.toThrow(/replace the demo API key/i);
   });
 
   it("reports health, service links, and capabilities", async () => {
@@ -64,17 +85,17 @@ describe("HTTP API", () => {
       mode: "offline",
       receipt_version: "efs-scribe-receipt/v1",
       writer_modes: ["offline"],
-      planned_writer_modes: ["sepolia"],
-      sepolia_status: "not_implemented",
+      planned_writer_modes: [],
+      sepolia_status: "missing_configuration",
       sepolia_preflight: "implemented_read_only",
       sepolia_config: {
         ready: false,
         missing: [
           "SEPOLIA_RPC_URL",
           "SERVICE_SPONSOR_PRIVATE_KEY",
-          "RECEIPT_SIGNER_PRIVATE_KEY",
           "AGENT_KEY_DERIVATION_SECRET"
-        ]
+        ],
+        agent_funding_target_wei: "1000000000000000"
       },
       efs: {
         sepolia: { chainId: 11155111 },

@@ -1,8 +1,11 @@
 import { z } from "zod";
 
 const HashSchema = z.string().regex(/^sha256:[0-9a-f]{64}$/);
-const HexSchema = z.custom<`0x${string}`>(
-  (value) => typeof value === "string" && /^0x[0-9a-fA-F]+$/.test(value)
+const AddressSchema = z.custom<`0x${string}`>(
+  (value) => typeof value === "string" && /^0x[0-9a-fA-F]{40}$/.test(value)
+);
+const TxHashSchema = z.custom<`0x${string}`>(
+  (value) => typeof value === "string" && /^0x[0-9a-fA-F]{64}$/.test(value)
 );
 const UidSchema = z.custom<`0x${string}`>(
   (value) => typeof value === "string" && /^0x[0-9a-fA-F]{64}$/.test(value)
@@ -28,7 +31,7 @@ export const ReceiptSchema = z.object({
     auth_level: z.enum(["write_key", "signed_request", "local_dev"])
   }),
   agent_lens: z.object({
-    attester: HexSchema,
+    attester: AddressSchema,
     derivation: z.string().min(1)
   }),
   integrity: z.object({
@@ -39,8 +42,8 @@ export const ReceiptSchema = z.object({
   efs: z.object({
     network: z.enum(["offline", "sepolia"]),
     chain_id: z.number().int().nonnegative(),
-    eas: HexSchema.nullable(),
-    tx_hashes: z.array(HexSchema),
+    eas: AddressSchema.nullable(),
+    tx_hashes: z.array(TxHashSchema),
     block_numbers: z.array(z.number().int().nonnegative()),
     path: z.string().min(1),
     uids: z.object({

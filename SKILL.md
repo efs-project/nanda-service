@@ -18,10 +18,9 @@ Authorization: Bearer <api-key>
 
 Reads and verification are public. Writes require an API key.
 
-Current mode: `offline`. Offline receipts are deterministic and do not make
-network or chain calls. Sepolia writes are planned but not enabled yet.
-Read-only Sepolia preflight exists in the service code, but it is not a public
-write mode yet.
+The service may run in `offline` or `sepolia` mode. Offline receipts are
+deterministic and do not make network or chain calls. Sepolia mode submits real
+EFS attestations to EAS after resolving existing path and transport anchors.
 
 ## Check Capabilities
 
@@ -56,8 +55,8 @@ curl -X POST http://localhost:3000/v1/files/plan \
 ```
 
 The response contains an ordered EFS plan with Data, Anchor, Property, Pin, and
-Mirror attestations. It also contains `preflight`, a list of Sepolia facts a
-real chain writer must resolve first. It does not store a receipt.
+Mirror attestations. It also contains `preflight`, a list of Sepolia facts the
+chain writer must resolve first. It does not store a receipt.
 
 ## Write A File
 
@@ -87,6 +86,10 @@ curl -X POST http://localhost:3000/v1/files \
 
 The response contains `receipt`. Keep that whole object.
 
+For `inline_base64` content, files up to 4096 decoded bytes are published as an
+EFS `data:` MIRROR. Larger files should use `hash_only` or
+`external_mirror_only` plus explicit mirrors.
+
 To preview without storing a receipt, use `POST /v1/files/plan` or include
 `"dry_run": true` in `options`.
 
@@ -105,6 +108,10 @@ curl 'http://localhost:3000/v1/resolve?path=%2Fagents%2Fdemo%2Fstatus.json'
 The response returns the latest stored receipt ID, attester lens, payload hash,
 and EFS-shaped UIDs for that path.
 
+Receipt lookup is memory-only in this MVP. Sepolia writes remain on-chain, but
+this endpoint only knows receipts created since the current service process
+started.
+
 ## Verify A Receipt
 
 ```bash
@@ -113,12 +120,12 @@ curl -X POST http://localhost:3000/v1/verify \
   -d '{"receipt": { "...": "paste the returned receipt object here" }}'
 ```
 
-Verification returns explicit checks. A passing offline receipt includes checks
-such as `offline_receipt_shape`, `offline_data_uid`, and
-`offline_placement_pin_uid`.
+Verification returns explicit checks. Offline verification is shape-only. A
+passing offline receipt includes checks such as `offline_receipt_shape`,
+`offline_data_uid`, and `offline_placement_pin_uid`.
 
 ## Limits
 
-Do not send secrets, private keys, personal data, or confidential URLs. Receipts
-are designed for independent verification of content hashes and EFS-shaped
-metadata.
+Do not send secrets, private keys, personal data, or confidential URLs. EFS
+records are public attestations. `agent.claimed_nanda_id` is a caller-supplied
+label; the API key subject controls the derived EFS attester lens.

@@ -20,6 +20,7 @@ const EnvSchema = z.object({
     .regex(/^0x[0-9a-fA-F]{40}$/)
     .default(SEPOLIA_EAS_ADDRESS),
   SEPOLIA_RPC_URL: z.string().default(""),
+  SEPOLIA_AGENT_FUNDING_TARGET_WEI: z.string().default("1000000000000000"),
   SERVICE_SPONSOR_PRIVATE_KEY: z.string().default(""),
   RECEIPT_SIGNER_PRIVATE_KEY: z.string().default("")
 });
@@ -29,6 +30,7 @@ export interface SepoliaConfig {
   missing: string[];
   rpcUrl?: string;
   easAddress: `0x${string}`;
+  agentFundingTargetWei: bigint;
   serviceSponsorPrivateKey?: `0x${string}`;
   receiptSignerPrivateKey?: `0x${string}`;
 }
@@ -62,17 +64,15 @@ export function parseEnv(env: NodeJS.ProcessEnv = process.env): AppConfig {
 function buildSepoliaConfig(parsed: z.infer<typeof EnvSchema>): SepoliaConfig {
   const missing: string[] = [];
   const rpcUrl = usableUrl(parsed.SEPOLIA_RPC_URL);
+  const agentFundingTargetWei = parseWei(parsed.SEPOLIA_AGENT_FUNDING_TARGET_WEI);
   const serviceSponsorPrivateKey = usablePrivateKey(parsed.SERVICE_SPONSOR_PRIVATE_KEY);
   const receiptSignerPrivateKey = usablePrivateKey(parsed.RECEIPT_SIGNER_PRIVATE_KEY);
 
   if (rpcUrl === undefined) {
     missing.push("SEPOLIA_RPC_URL");
   }
-  if (serviceSponsorPrivateKey === undefined) {
+  if (agentFundingTargetWei > 0n && serviceSponsorPrivateKey === undefined) {
     missing.push("SERVICE_SPONSOR_PRIVATE_KEY");
-  }
-  if (receiptSignerPrivateKey === undefined) {
-    missing.push("RECEIPT_SIGNER_PRIVATE_KEY");
   }
   if (isPlaceholderSecret(parsed.AGENT_KEY_DERIVATION_SECRET)) {
     missing.push("AGENT_KEY_DERIVATION_SECRET");
@@ -83,6 +83,7 @@ function buildSepoliaConfig(parsed: z.infer<typeof EnvSchema>): SepoliaConfig {
     missing,
     rpcUrl,
     easAddress: parsed.EFS_EAS_ADDRESS as `0x${string}`,
+    agentFundingTargetWei,
     serviceSponsorPrivateKey,
     receiptSignerPrivateKey
   };
@@ -102,6 +103,14 @@ function usablePrivateKey(value: string): `0x${string}` | undefined {
     return trimmed as `0x${string}`;
   }
   return undefined;
+}
+
+function parseWei(value: string): bigint {
+  const trimmed = value.trim();
+  if (!/^\d+$/.test(trimmed)) {
+    throw new Error("SEPOLIA_AGENT_FUNDING_TARGET_WEI must be a non-negative integer");
+  }
+  return BigInt(trimmed);
 }
 
 function isPlaceholderSecret(value: string): boolean {

@@ -57,14 +57,25 @@ export interface EasLayerRequests {
   layer: number;
   requests: EasMultiAttestationRequest[];
   flatRefs: string[];
+  flatSchemas: Uid[];
+}
+
+export interface EasAttestedEvent {
+  attester: Hex;
+  recipient: Hex;
+  schemaUID: Uid;
+  uid: Uid;
 }
 
 export function buildMultiAttestLayer(
   plan: EfsWritePlan,
   layer: number,
-  refs: ReadonlyMap<string, Uid>
+  refs: ReadonlyMap<string, Uid>,
+  options: { skipRefs?: ReadonlySet<string> } = {}
 ): EasLayerRequests {
-  const attestations = plan.layers.filter((attestation) => attestation.layer === layer);
+  const attestations = plan.layers.filter(
+    (attestation) => attestation.layer === layer && !options.skipRefs?.has(attestation.ref)
+  );
   const order: Uid[] = [];
   const bySchema = new Map<Uid, { refs: string[]; data: EasAttestationRequestData[] }>();
 
@@ -77,7 +88,10 @@ export function buildMultiAttestLayer(
   return {
     layer,
     requests: order.map((schema) => ({ schema, data: bySchema.get(schema)?.data ?? [] })),
-    flatRefs: order.flatMap((schema) => bySchema.get(schema)?.refs ?? [])
+    flatRefs: order.flatMap((schema) => bySchema.get(schema)?.refs ?? []),
+    flatSchemas: order.flatMap((schema) =>
+      Array.from({ length: bySchema.get(schema)?.refs.length ?? 0 }, () => schema)
+    )
   };
 }
 
@@ -86,21 +100,29 @@ export function extractAttestedUidsFromLogs(
   easAddress: Hex,
   expected: number
 ): Uid[] {
+  return extractAttestedEventsFromLogs(logs, easAddress, expected).map((event) => event.uid);
+}
+
+export function extractAttestedEventsFromLogs(
+  logs: readonly Log[],
+  easAddress: Hex,
+  expected: number
+): EasAttestedEvent[] {
   const easLower = easAddress.toLowerCase();
   const parsed = parseEventLogs({
     abi: EAS_MULTIATTEST_ABI,
     eventName: "Attested",
     logs: logs as Log[]
   });
-  const uids = parsed
+  const events = parsed
     .filter((log) => log.address.toLowerCase() === easLower)
-    .map((log) => (log.args as { uid: Uid }).uid);
+    .map((log) => log.args as unknown as EasAttestedEvent);
 
-  if (uids.length === expected) {
-    return uids;
+  if (events.length === expected) {
+    return events;
   }
 
-  const manual: Uid[] = [];
+  const manual: EasAttestedEvent[] = [];
   for (const log of logs) {
     if (log.address.toLowerCase() !== easLower) {
       continue;
@@ -112,7 +134,7 @@ export function extractAttestedUidsFromLogs(
         topics: log.topics
       });
       if (event.eventName === "Attested") {
-        manual.push((event.args as { uid: Uid }).uid);
+        manual.push(event.args as unknown as EasAttestedEvent);
       }
     } catch {
       /* Ignore non-EAS Attested logs. */
@@ -120,9 +142,31 @@ export function extractAttestedUidsFromLogs(
   }
 
   if (manual.length !== expected) {
-    throw new Error(`Expected ${expected} EAS Attested event(s), found ${uids.length}`);
+    throw new Error(`Expected ${expected} EAS Attested event(s), found ${events.length}`);
   }
   return manual;
+}
+
+export function assertAttestedEventsMatch(input: {
+  events: readonly EasAttestedEvent[];
+  expectedAttester: Hex;
+  expectedSchemas: readonly Uid[];
+}): void {
+  if (input.events.length !== input.expectedSchemas.length) {
+    throw new Error(
+      `Expected ${input.expectedSchemas.length} EAS Attested event(s), found ${input.events.length}`
+    );
+  }
+  const expectedAttester = input.expectedAttester.toLowerCase();
+  input.events.forEach((event, index) => {
+    if (event.attester.toLowerCase() !== expectedAttester) {
+      throw new Error(`Unexpected EAS attester for event ${index}`);
+    }
+    const expectedSchema = input.expectedSchemas[index];
+    if (expectedSchema !== undefined && event.schemaUID.toLowerCase() !== expectedSchema.toLowerCase()) {
+      throw new Error(`Unexpected EAS schema for event ${index}`);
+    }
+  });
 }
 
 function getSchemaBucket(

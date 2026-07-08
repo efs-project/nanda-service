@@ -70,7 +70,12 @@ describe("buildFileWritePlan", () => {
     expect(refs.get("data")?.schema).toBe(EFS_SCHEMA_UIDS.DATA);
     expect(refs.get("anchor:/agents/demo/status.json")?.schema).toBe(EFS_SCHEMA_UIDS.ANCHOR);
     expect(refs.get("placement.pin")?.schema).toBe(EFS_SCHEMA_UIDS.PIN);
+    expect(refs.get("mirror.0")?.fields).toMatchObject({
+      transport: "data",
+      uri: `data:application/json;base64,${Buffer.from('{"ok":true}', "utf8").toString("base64")}`
+    });
     expect(refs.get("mirror.0")?.schema).toBe(EFS_SCHEMA_UIDS.MIRROR);
+    expect(refs.get("mirror.1")?.schema).toBe(EFS_SCHEMA_UIDS.MIRROR);
     expect(refs.get("property:contentHash.pin")?.schema).toBe(EFS_SCHEMA_UIDS.PIN);
     expect(refs.get("property:name.pin")?.schema).toBe(EFS_SCHEMA_UIDS.PIN);
     expect(refs.get("property:schema.pin")?.schema).toBe(EFS_SCHEMA_UIDS.PIN);
@@ -86,7 +91,7 @@ describe("buildFileWritePlan", () => {
       definition: { ref: "anchor:/agents/demo/status.json" }
     });
     expect(refs.get("anchor:/agents")?.refUID).toEqual({ external: "efs.rootAnchorUID" });
-    expect(refs.get("mirror.0")?.fields).toMatchObject({
+    expect(refs.get("mirror.1")?.fields).toMatchObject({
       transport: "https",
       transportDefinition: { external: "efs.transport.https" }
     });
@@ -99,6 +104,11 @@ describe("buildFileWritePlan", () => {
         expect.objectContaining({
           kind: "path_anchor",
           path: "/agents"
+        }),
+        expect.objectContaining({
+          kind: "transport_anchor",
+          ref: "efs.transport.data",
+          path: "/transports/data"
         }),
         expect.objectContaining({
           kind: "transport_anchor",
@@ -187,6 +197,53 @@ describe("buildFileWritePlan", () => {
         context
       )
     ).toThrow();
+  });
+
+  it("rejects malformed or oversized public write input", () => {
+    expect(() =>
+      buildFileWritePlan(
+        {
+          path: "/agents/demo/status.json",
+          content: {
+            mode: "inline_base64",
+            content_base64: "not base64!",
+            content_type: "application/json"
+          }
+        },
+        context
+      )
+    ).toThrow(/base64/i);
+
+    expect(() =>
+      buildFileWritePlan(
+        {
+          path: "/agents/demo/status.json",
+          content: {
+            mode: "inline_base64",
+            content_base64: Buffer.alloc(4_097).toString("base64"),
+            content_type: "application/octet-stream"
+          }
+        },
+        context
+      )
+    ).toThrow(/4096/);
+
+    expect(() =>
+      buildFileWritePlan(
+        {
+          path: "/agents/demo/status.json",
+          content: {
+            mode: "hash_only",
+            payload_sha256:
+              "sha256:43258cff783fe7036d8a43033f830adfc60ec037382473548ac742b888292777"
+          },
+          properties: Object.fromEntries(
+            Array.from({ length: 33 }, (_, index) => [`key${index}`, "value"])
+          )
+        },
+        context
+      )
+    ).toThrow(/properties/i);
   });
 });
 

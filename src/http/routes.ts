@@ -8,16 +8,25 @@ import { authenticateApiKey, parseApiKeys } from "../auth/api-key.js";
 import { deriveAttester } from "../auth/derived-attester.js";
 import { EFS_SCHEMA_UIDS, EFS_SEPOLIA } from "../config/chains.js";
 import type { AppConfig } from "../config/env.js";
-import { OfflineEfsWriter } from "../efs/offline-writer.js";
+import { SepoliaPreflightError } from "../efs/sepolia-preflight.js";
+import { SepoliaSubmitError } from "../efs/sepolia-writer.js";
 import { EfsWritePlanError, normalizeEfsPath } from "../efs/write-plan.js";
-import { FileWriteRequestSchema, type FileWriteRequest, type WriterContext } from "../efs/writer.js";
+import {
+  FileWriteRequestSchema,
+  type EfsWriter,
+  type FileWriteRequest,
+  type WriterContext
+} from "../efs/writer.js";
 import { badRequest, conflict, HttpError, notFound } from "../lib/errors.js";
 import { InMemoryReceiptRepository } from "../receipts/repository.js";
 import { ReceiptSchema } from "../receipts/schema.js";
 
-export async function registerRoutes(app: FastifyInstance, config: AppConfig): Promise<void> {
+export async function registerRoutes(
+  app: FastifyInstance,
+  config: AppConfig,
+  writer: EfsWriter
+): Promise<void> {
   const apiKeys = parseApiKeys(config.apiKeysJson);
-  const writer = new OfflineEfsWriter();
   const receipts = new InMemoryReceiptRepository();
 
   app.setErrorHandler((error, _request, reply) => {
@@ -31,6 +40,10 @@ export async function registerRoutes(app: FastifyInstance, config: AppConfig): P
     }
     if (error instanceof EfsWritePlanError) {
       void reply.status(400).send({ error: "bad_request", message: error.message });
+      return;
+    }
+    if (error instanceof SepoliaPreflightError || error instanceof SepoliaSubmitError) {
+      void reply.status(400).send({ error: "sepolia_write_error", message: error.message });
       return;
     }
     void reply.status(500).send({ error: "internal_error", message: "Unexpected service error" });
@@ -115,13 +128,14 @@ export async function registerRoutes(app: FastifyInstance, config: AppConfig): P
     mode: config.mode,
     receipt_version: "efs-scribe-receipt/v1",
     auth_modes: ["api_key"],
-    writer_modes: ["offline"],
-    planned_writer_modes: ["sepolia"],
-    sepolia_status: "not_implemented",
+    writer_modes: config.mode === "sepolia" ? ["offline", "sepolia"] : ["offline"],
+    planned_writer_modes: [],
+    sepolia_status: config.sepolia.ready ? "available_when_configured" : "missing_configuration",
     sepolia_preflight: "implemented_read_only",
     sepolia_config: {
       ready: config.sepolia.ready,
-      missing: config.sepolia.missing
+      missing: config.sepolia.missing,
+      agent_funding_target_wei: config.sepolia.agentFundingTargetWei.toString()
     },
     content_modes: ["inline_base64", "hash_only", "external_mirror_only"],
     writes_require_auth: true,

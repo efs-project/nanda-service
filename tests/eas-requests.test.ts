@@ -13,7 +13,9 @@ import type { AuthContext } from "../src/auth/subject.js";
 import { EFS_SCHEMA_UIDS, EFS_SEPOLIA } from "../src/config/chains.js";
 import {
   EAS_ATTESTED_EVENT,
+  assertAttestedEventsMatch,
   buildMultiAttestLayer,
+  extractAttestedEventsFromLogs,
   extractAttestedUidsFromLogs
 } from "../src/efs/eas-requests.js";
 import { buildFileWritePlan } from "../src/efs/write-plan.js";
@@ -107,6 +109,38 @@ describe("EAS request construction", () => {
     expect(() => buildMultiAttestLayer(plan, 1, new Map())).toThrow(/unresolved/i);
   });
 
+  it("can omit already-resolved planned refs from a layer", () => {
+    const plan = buildFileWritePlan(
+      {
+        path: "/agents/demo/status.json",
+        content: {
+          mode: "hash_only",
+          payload_sha256:
+            "sha256:43258cff783fe7036d8a43033f830adfc60ec037382473548ac742b888292777",
+          content_type: "application/json"
+        }
+      },
+      context
+    );
+
+    const layer = buildMultiAttestLayer(
+      plan,
+      1,
+      new Map<string, Uid>([
+        ["data", uid(10)],
+        ["anchor:/agents", uid(11)]
+      ]),
+      { skipRefs: new Set(["anchor:/agents/demo"]) }
+    );
+
+    expect(layer.flatRefs).toEqual([
+      "property:contentHash.anchor",
+      "property:contentType.anchor"
+    ]);
+    expect(layer.requests).toHaveLength(1);
+    expect(layer.requests[0]?.schema).toBe(EFS_SCHEMA_UIDS.ANCHOR);
+  });
+
   it("extracts EAS Attested UIDs in receipt order and filters non-EAS logs", () => {
     const first = uid(1);
     const ignored = uid(2);
@@ -120,20 +154,61 @@ describe("EAS request construction", () => {
     expect(extractAttestedUidsFromLogs(logs, EFS_SEPOLIA.eas, 2)).toEqual([first, second]);
     expect(() => extractAttestedUidsFromLogs(logs, EFS_SEPOLIA.eas, 3)).toThrow(/expected 3/i);
   });
+
+  it("validates emitted attesters and schemas before mapping UIDs to planned refs", () => {
+    const expectedAttester = "0x2222222222222222222222222222222222222222" as const;
+    const logs = [
+      attestedLog(EFS_SEPOLIA.eas, uid(1), {
+        attester: expectedAttester,
+        schemaUID: EFS_SCHEMA_UIDS.DATA
+      }),
+      attestedLog(EFS_SEPOLIA.eas, uid(2), {
+        attester: expectedAttester,
+        schemaUID: EFS_SCHEMA_UIDS.ANCHOR
+      })
+    ];
+    const events = extractAttestedEventsFromLogs(logs, EFS_SEPOLIA.eas, 2);
+
+    expect(() =>
+      assertAttestedEventsMatch({
+        events,
+        expectedAttester,
+        expectedSchemas: [EFS_SCHEMA_UIDS.DATA, EFS_SCHEMA_UIDS.ANCHOR]
+      })
+    ).not.toThrow();
+    expect(() =>
+      assertAttestedEventsMatch({
+        events,
+        expectedAttester: ZERO_ADDRESS,
+        expectedSchemas: [EFS_SCHEMA_UIDS.DATA, EFS_SCHEMA_UIDS.ANCHOR]
+      })
+    ).toThrow(/attester/i);
+    expect(() =>
+      assertAttestedEventsMatch({
+        events,
+        expectedAttester,
+        expectedSchemas: [EFS_SCHEMA_UIDS.ANCHOR, EFS_SCHEMA_UIDS.DATA]
+      })
+    ).toThrow(/schema/i);
+  });
 });
 
 function uid(n: number): Uid {
   return `0x${n.toString(16).padStart(64, "0")}`;
 }
 
-function attestedLog(address: `0x${string}`, uidValue: Uid): Log {
+function attestedLog(
+  address: `0x${string}`,
+  uidValue: Uid,
+  options: { attester?: `0x${string}`; schemaUID?: Uid } = {}
+): Log {
   const topics = encodeEventTopics({
     abi: [parseAbiItem(EAS_ATTESTED_EVENT)],
     eventName: "Attested",
     args: {
       recipient: ZERO_ADDRESS,
-      attester: ZERO_ADDRESS,
-      schemaUID: EFS_SCHEMA_UIDS.DATA
+      attester: options.attester ?? ZERO_ADDRESS,
+      schemaUID: options.schemaUID ?? EFS_SCHEMA_UIDS.DATA
     }
   });
 
