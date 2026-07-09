@@ -1,7 +1,13 @@
+import Fastify from "fastify";
 import { describe, expect, it } from "vitest";
 
-import { EFS_SEPOLIA } from "../src/config/chains.js";
-import { parseEnv } from "../src/config/env.js";
+import { EFS_SEPOLIA, EFS_TRANSPORTS } from "../src/config/chains.js";
+import { parseEnv, type AppConfig } from "../src/config/env.js";
+import { OfflineEfsWriter } from "../src/efs/offline-writer.js";
+import { SepoliaSubmitError } from "../src/efs/sepolia-writer.js";
+import type { EfsWritePlan, EfsWriter, WriterContext } from "../src/efs/writer.js";
+import { registerRoutes } from "../src/http/routes.js";
+import type { EfsScribeReceipt } from "../src/receipts/schema.js";
 import { buildApp } from "../src/server.js";
 
 const writeBody = {
@@ -166,6 +172,11 @@ describe("HTTP API", () => {
               mirrors: {
                 items: { $ref: "#/components/schemas/Mirror" }
               }
+            }
+          },
+          Mirror: {
+            properties: {
+              transport: { enum: [...EFS_TRANSPORTS] }
             }
           },
           VerifyReceiptRequest: {
@@ -348,6 +359,33 @@ describe("HTTP API", () => {
     await app.close();
   });
 
+  it("deduplicates concurrent writes with the same idempotency key before submitting", async () => {
+    const writer = new SlowOfflineWriter({ now: () => new Date("2026-07-08T00:00:00Z") });
+    const app = await appWithWriter(writer);
+
+    const [first, second] = await Promise.all([
+      app.inject({
+        method: "POST",
+        url: "/v1/files",
+        headers: { authorization: "Bearer local-scribe-key" },
+        payload: writeBody
+      }),
+      app.inject({
+        method: "POST",
+        url: "/v1/files",
+        headers: { authorization: "Bearer local-scribe-key" },
+        payload: writeBody
+      })
+    ]);
+
+    expect(first.statusCode).toBe(200);
+    expect(second.statusCode).toBe(200);
+    expect(first.json().receipt).toEqual(second.json().receipt);
+    expect(writer.submitCount).toBe(1);
+
+    await app.close();
+  });
+
   it("rejects idempotency key reuse for a different request", async () => {
     const app = await buildApp({
       mode: "offline",
@@ -459,4 +497,95 @@ describe("HTTP API", () => {
 
     await app.close();
   });
+
+  it("returns 400 for malformed public resolve and verify requests", async () => {
+    const app = await buildApp({
+      mode: "offline",
+      apiKeysJson: '{"local-scribe-key":"api-key:local-scribe-agent"}',
+      derivationSecret: "unit-test-secret",
+      publicBaseUrl: "http://localhost:3000",
+      logLevel: "silent"
+    });
+
+    const duplicatePath = await app.inject({
+      method: "GET",
+      url: "/v1/resolve?path=%2Fagents%2Fdemo%2Fone.json&path=%2Fagents%2Fdemo%2Ftwo.json"
+    });
+    const missingReceipt = await app.inject({
+      method: "POST",
+      url: "/v1/verify",
+      payload: {}
+    });
+    const nullBody = await app.inject({
+      method: "POST",
+      url: "/v1/verify",
+      headers: { "content-type": "application/json" },
+      payload: "null"
+    });
+
+    expect(duplicatePath.statusCode).toBe(400);
+    expect(missingReceipt.statusCode).toBe(400);
+    expect(nullBody.statusCode).toBe(400);
+
+    await app.close();
+  });
+
+  it("reports Sepolia dependency failures as service errors", async () => {
+    const app = await appWithWriter(new ThrowingSepoliaWriter());
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/files",
+      headers: { authorization: "Bearer local-scribe-key" },
+      payload: writeBody
+    });
+
+    expect(response.statusCode).toBe(503);
+    expect(response.json()).toMatchObject({ error: "sepolia_write_error" });
+
+    await app.close();
+  });
 });
+
+const testConfig: AppConfig = {
+  mode: "offline",
+  apiKeysJson: '{"local-scribe-key":"api-key:local-scribe-agent"}',
+  derivationSecret: "unit-test-secret",
+  publicBaseUrl: "http://localhost:3000",
+  port: 3000,
+  logLevel: "silent",
+  chainId: 11155111,
+  sepolia: {
+    ready: false,
+    missing: [],
+    easAddress: EFS_SEPOLIA.eas,
+    agentFundingTargetWei: 0n
+  }
+};
+
+async function appWithWriter(writer: EfsWriter) {
+  const app = Fastify({ logger: false });
+  await registerRoutes(app, testConfig, writer);
+  return app;
+}
+
+class SlowOfflineWriter extends OfflineEfsWriter {
+  submitCount = 0;
+
+  override async submitPlan(
+    plan: EfsWritePlan,
+    context: WriterContext
+  ): Promise<EfsScribeReceipt> {
+    this.submitCount += 1;
+    if (this.submitCount === 1) {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    return super.submitPlan(plan, context);
+  }
+}
+
+class ThrowingSepoliaWriter extends OfflineEfsWriter {
+  override async submitPlan(): Promise<EfsScribeReceipt> {
+    throw new SepoliaSubmitError("Sepolia RPC unavailable");
+  }
+}

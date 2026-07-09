@@ -84,4 +84,16 @@ describe("OfflineEfsWriter", () => {
     expect(verification.ok).toBe(true);
     expect(verification.checks.map((check) => check.name)).toContain("offline_receipt_shape");
   });
+
+  it("includes every planned property pin in offline receipts", async () => {
+    const writer = new OfflineEfsWriter({ now: () => new Date("2026-07-08T00:00:00Z") });
+    const receipt = await writer.writeFile(request, contextFor("local-scribe-key"));
+
+    expect(Object.keys(receipt.efs.uids.properties).sort()).toEqual([
+      "contentHash",
+      "contentType",
+      "name",
+      "size"
+    ]);
+  });
 });

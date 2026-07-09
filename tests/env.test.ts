@@ -71,4 +71,24 @@ describe("parseEnv", () => {
     expect(config.sepolia.serviceSponsorPrivateKey).toBeUndefined();
     expect(config.sepolia.agentFundingTargetWei).toBe(0n);
   });
+
+  it("does not mark Sepolia mode ready with a non-Sepolia chain id", () => {
+    const config = parseEnv({
+      EFS_SCRIBE_MODE: "sepolia",
+      API_KEYS_JSON: '{"real-key":"api-key:real-agent"}',
+      AGENT_KEY_DERIVATION_SECRET: "realistic-non-default-derivation-secret",
+      PUBLIC_BASE_URL: "http://localhost:3000",
+      PORT: "3000",
+      LOG_LEVEL: "silent",
+      EFS_CHAIN_ID: "1",
+      EFS_EAS_ADDRESS: EFS_SEPOLIA.eas,
+      SEPOLIA_RPC_URL: "https://sepolia.example.test/rpc",
+      SEPOLIA_AGENT_FUNDING_TARGET_WEI: "0",
+      SERVICE_SPONSOR_PRIVATE_KEY: "",
+      RECEIPT_SIGNER_PRIVATE_KEY: ""
+    });
+
+    expect(config.sepolia.ready).toBe(false);
+    expect(config.sepolia.missing).toContain("EFS_CHAIN_ID");
+  });
 });

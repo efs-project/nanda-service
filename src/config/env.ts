@@ -71,6 +71,9 @@ function buildSepoliaConfig(parsed: z.infer<typeof EnvSchema>): SepoliaConfig {
   if (rpcUrl === undefined) {
     missing.push("SEPOLIA_RPC_URL");
   }
+  if (parsed.EFS_SCRIBE_MODE === "sepolia" && parsed.EFS_CHAIN_ID !== SEPOLIA_CHAIN_ID) {
+    missing.push("EFS_CHAIN_ID");
+  }
   if (agentFundingTargetWei > 0n && serviceSponsorPrivateKey === undefined) {
     missing.push("SERVICE_SPONSOR_PRIVATE_KEY");
   }

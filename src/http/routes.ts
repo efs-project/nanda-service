@@ -1,25 +1,45 @@
 import { readFile } from "node:fs/promises";
 
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
-import { ZodError } from "zod";
+import { z, ZodError } from "zod";
 
 import type { ApiKeyMap } from "../auth/api-key.js";
 import { authenticateApiKey, parseApiKeys } from "../auth/api-key.js";
 import { deriveAttester } from "../auth/derived-attester.js";
-import { EFS_SCHEMA_UIDS, EFS_SEPOLIA } from "../config/chains.js";
+import { EFS_SCHEMA_UIDS, EFS_SEPOLIA, EFS_TRANSPORTS } from "../config/chains.js";
 import type { AppConfig } from "../config/env.js";
 import { SepoliaPreflightError } from "../efs/sepolia-preflight.js";
 import { SepoliaSubmitError } from "../efs/sepolia-writer.js";
 import { EfsWritePlanError, normalizeEfsPath } from "../efs/write-plan.js";
 import {
   FileWriteRequestSchema,
+  type EfsWritePlan,
   type EfsWriter,
   type FileWriteRequest,
   type WriterContext
 } from "../efs/writer.js";
-import { badRequest, conflict, HttpError, notFound } from "../lib/errors.js";
+import { conflict, HttpError, notFound } from "../lib/errors.js";
 import { InMemoryReceiptRepository } from "../receipts/repository.js";
-import { ReceiptSchema } from "../receipts/schema.js";
+import { ReceiptSchema, type EfsScribeReceipt } from "../receipts/schema.js";
+
+const ResolveQuerySchema = z.object({
+  path: z.string().min(1),
+  attester: z.string().regex(/^0x[0-9a-fA-F]{40}$/).optional()
+});
+
+const VerifyReceiptBodySchema = z.object({
+  receipt: ReceiptSchema
+});
+
+interface SubmissionResult {
+  receipt: EfsScribeReceipt;
+  error?: SepoliaSubmitError;
+}
+
+interface PendingIdempotentSubmission {
+  canonicalRequestHash: string;
+  result: Promise<SubmissionResult>;
+}
 
 export async function registerRoutes(
   app: FastifyInstance,
@@ -28,6 +48,7 @@ export async function registerRoutes(
 ): Promise<void> {
   const apiKeys = parseApiKeys(config.apiKeysJson);
   const receipts = new InMemoryReceiptRepository();
+  const pendingIdempotentSubmissions = new Map<string, PendingIdempotentSubmission>();
 
   app.setErrorHandler((error, _request, reply) => {
     if (error instanceof HttpError) {
@@ -43,7 +64,7 @@ export async function registerRoutes(
       return;
     }
     if (error instanceof SepoliaPreflightError || error instanceof SepoliaSubmitError) {
-      void reply.status(400).send({ error: "sepolia_write_error", message: error.message });
+      void reply.status(503).send(sepoliaErrorBody(error));
       return;
     }
     void reply.status(500).send({ error: "internal_error", message: "Unexpected service error" });
@@ -185,7 +206,7 @@ export async function registerRoutes(
           type: "object",
           required: ["transport", "uri"],
           properties: {
-            transport: { type: "string", enum: ["https", "ipfs", "arweave", "data"] },
+            transport: { type: "string", enum: [...EFS_TRANSPORTS] },
             uri: { type: "string", example: "https://example.com/status.json" }
           }
         },
@@ -291,33 +312,15 @@ export async function registerRoutes(
       return planResponse(plan, config);
     }
 
-    const existing =
-      parsed.options.idempotency_key === undefined
-        ? undefined
-        : await receipts.getByIdempotency(
-            context.auth.authenticated_subject,
-            parsed.options.idempotency_key
-          );
-    if (existing !== undefined) {
-      if (existing.integrity.canonical_request_sha256 !== plan.canonicalRequestHash) {
-        throw conflict("Idempotency key was already used for a different file write request");
-      }
-      return {
-        receipt: existing,
-        links: existing.links
-      };
-    }
-
-    const receipt = await writer.submitPlan(plan, context);
-    await receipts.save(receipt, {
-      authenticatedSubject: context.auth.authenticated_subject,
+    const submission = await submitWithIdempotency({
+      receipts,
+      pendingIdempotentSubmissions,
+      writer,
+      plan,
+      context,
       idempotencyKey: parsed.options.idempotency_key
     });
-
-    return {
-      receipt,
-      links: receipt.links
-    };
+    return sendSubmission(_reply, submission);
   });
 
   app.get("/v1/receipts/:receiptId", async (request: FastifyRequest) => {
@@ -330,10 +333,7 @@ export async function registerRoutes(
   });
 
   app.get("/v1/resolve", async (request: FastifyRequest) => {
-    const query = request.query as { path?: string; attester?: string };
-    if (query.path === undefined) {
-      throw badRequest("Missing required query parameter: path");
-    }
+    const query = ResolveQuerySchema.parse(request.query);
 
     const path = normalizeEfsPath(query.path).canonicalPath;
     const receipt = await receipts.getLatestByPath(path, query.attester);
@@ -352,8 +352,8 @@ export async function registerRoutes(
   });
 
   app.post("/v1/verify", async (request: FastifyRequest) => {
-    const body = request.body as { receipt?: unknown };
-    const receipt = ReceiptSchema.parse(body.receipt);
+    const body = VerifyReceiptBodySchema.parse(request.body);
+    const receipt = body.receipt;
     return writer.verifyReceipt(receipt);
   });
 }
@@ -400,4 +400,107 @@ function planResponse(plan: unknown, config: AppConfig) {
       capabilities: `${config.publicBaseUrl}/v1/capabilities`
     }
   };
+}
+
+async function submitWithIdempotency(input: {
+  receipts: InMemoryReceiptRepository;
+  pendingIdempotentSubmissions: Map<string, PendingIdempotentSubmission>;
+  writer: EfsWriter;
+  plan: EfsWritePlan;
+  context: WriterContext;
+  idempotencyKey?: string;
+}): Promise<SubmissionResult> {
+  const { idempotencyKey } = input;
+  if (idempotencyKey === undefined) {
+    return submitAndStore(input);
+  }
+
+  const key = idempotencyKeyFor(input.context.auth.authenticated_subject, idempotencyKey);
+  const existing = await input.receipts.getByIdempotency(
+    input.context.auth.authenticated_subject,
+    idempotencyKey
+  );
+  if (existing !== undefined) {
+    assertSameIdempotentRequest(existing, input.plan);
+    return { receipt: existing };
+  }
+
+  const pending = input.pendingIdempotentSubmissions.get(key);
+  if (pending !== undefined) {
+    if (pending.canonicalRequestHash !== input.plan.canonicalRequestHash) {
+      throw conflict("Idempotency key is already in use for a different file write request");
+    }
+    return pending.result;
+  }
+
+  const result = submitAndStore(input);
+  input.pendingIdempotentSubmissions.set(key, {
+    canonicalRequestHash: input.plan.canonicalRequestHash,
+    result
+  });
+  try {
+    return await result;
+  } finally {
+    input.pendingIdempotentSubmissions.delete(key);
+  }
+}
+
+async function submitAndStore(input: {
+  receipts: InMemoryReceiptRepository;
+  writer: EfsWriter;
+  plan: EfsWritePlan;
+  context: WriterContext;
+  idempotencyKey?: string;
+}): Promise<SubmissionResult> {
+  try {
+    const receipt = await input.writer.submitPlan(input.plan, input.context);
+    await input.receipts.save(receipt, {
+      authenticatedSubject: input.context.auth.authenticated_subject,
+      idempotencyKey: input.idempotencyKey
+    });
+    return { receipt };
+  } catch (error) {
+    if (error instanceof SepoliaSubmitError && error.partialReceipt !== undefined) {
+      await input.receipts.save(error.partialReceipt, {
+        authenticatedSubject: input.context.auth.authenticated_subject,
+        idempotencyKey: input.idempotencyKey
+      });
+      return { receipt: error.partialReceipt, error };
+    }
+    throw error;
+  }
+}
+
+function sendSubmission(reply: FastifyReply, submission: SubmissionResult) {
+  if (submission.error !== undefined || submission.receipt.status === "failed") {
+    return reply.status(503).send({
+      ...sepoliaErrorBody(submission.error ?? new SepoliaSubmitError("Sepolia write failed")),
+      receipt: submission.receipt,
+      links: submission.receipt.links
+    });
+  }
+  return {
+    receipt: submission.receipt,
+    links: submission.receipt.links
+  };
+}
+
+function sepoliaErrorBody(error: SepoliaPreflightError | SepoliaSubmitError) {
+  return {
+    error: "sepolia_write_error",
+    message: error.message,
+    ...(error instanceof SepoliaSubmitError && error.partialReceipt !== undefined
+      ? { receipt: error.partialReceipt, links: error.partialReceipt.links }
+      : {})
+  };
+}
+
+function assertSameIdempotentRequest(receipt: EfsScribeReceipt, plan: EfsWritePlan): void {
+  if (receipt.integrity.canonical_request_sha256 !== plan.canonicalRequestHash) {
+    throw conflict("Idempotency key was already used for a different file write request");
+  }
+}
+
+function idempotencyKeyFor(authenticatedSubject: string, idempotencyKey: string): string {
+  return `${authenticatedSubject}\0${idempotencyKey}`;
 }

@@ -53,7 +53,7 @@ export class OfflineEfsWriter implements EfsWriter {
     const dataUid = mustGet(minted, "data");
     const fileAnchorUid = mustGet(minted, `anchor:${plan.path}`);
     const placementPinUid = mustGet(minted, "placement.pin");
-    const contentHashPinUid = mustGet(minted, "property:contentHash.pin");
+    const propertyUids = collectPropertyPins(minted);
     const mirrorUids = [...minted.entries()]
       .filter(([ref]) => ref.startsWith("mirror."))
       .sort(([left], [right]) => left.localeCompare(right))
@@ -90,9 +90,7 @@ export class OfflineEfsWriter implements EfsWriter {
           file_anchor: fileAnchorUid,
           placement_pin: placementPinUid,
           mirrors: mirrorUids,
-          properties: {
-            contentHash: contentHashPinUid
-          }
+          properties: propertyUids
         }
       },
       verification: {
@@ -169,6 +167,19 @@ function mustGet(minted: Map<string, Uid>, ref: string): Uid {
     throw new Error(`Missing planned attestation ref ${ref}`);
   }
   return uid;
+}
+
+function collectPropertyPins(minted: Map<string, Uid>): Record<string, Uid> {
+  const properties: Record<string, Uid> = {};
+  for (const [ref, uid] of minted.entries()) {
+    const match = /^property:(.*)\.pin$/.exec(ref);
+    if (match?.[1] !== undefined) {
+      properties[match[1]] = uid;
+    }
+  }
+  return Object.fromEntries(
+    Object.entries(properties).sort(([left], [right]) => left.localeCompare(right))
+  ) as Record<string, Uid>;
 }
 
 function offlineChecks(input: {

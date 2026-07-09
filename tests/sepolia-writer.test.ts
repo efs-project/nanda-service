@@ -185,6 +185,97 @@ describe("SepoliaEfsWriter", () => {
       )
     ).rejects.toThrow(SepoliaSubmitError);
   });
+
+  it("does not fund the derived agent when Sepolia preflight fails", async () => {
+    const root = uid(31);
+    const agents = uid(32);
+    const demo = uid(33);
+    const publicClient = new FakeSepoliaPublicClient(root, {
+      [pathKey(root, "agents")]: agents,
+      [pathKey(agents, "demo")]: demo,
+      [anchorKey(demo, "status.json", EFS_SCHEMA_UIDS.DATA)]: ZERO_UID
+    });
+    const sponsorWallet = new FakeSepoliaWallet(publicClient);
+    const writer = new SepoliaEfsWriter({
+      chainId: 11155111,
+      easAddress: EFS_SEPOLIA.eas,
+      indexerAddress: EFS_SEPOLIA.indexer,
+      publicClient,
+      sponsorWallet,
+      walletClientFactory: () => new FakeSepoliaWallet(publicClient),
+      agentFundingTargetWei: 1_000_000n,
+      now: () => new Date("2026-07-08T00:00:00Z")
+    });
+
+    await expect(
+      writer.writeFile(
+        {
+          path: "/agents/demo/status.json",
+          content: {
+            mode: "hash_only",
+            payload_sha256:
+              "sha256:43258cff783fe7036d8a43033f830adfc60ec037382473548ac742b888292777"
+          },
+          mirrors: [{ transport: "https", uri: "https://example.com/status.json" }]
+        },
+        context
+      )
+    ).rejects.toThrow(/transport/i);
+    expect(sponsorWallet.sentTransfers).toEqual([]);
+  });
+
+  it("attaches a failed receipt when a later Sepolia layer fails after earlier txs land", async () => {
+    const root = uid(41);
+    const agents = uid(42);
+    const demo = uid(43);
+    const publicClient = new FakeSepoliaPublicClient(root, {
+      [pathKey(root, "agents")]: agents,
+      [pathKey(agents, "demo")]: demo,
+      [anchorKey(demo, "status.json", EFS_SCHEMA_UIDS.DATA)]: ZERO_UID
+    });
+    const agentWallet = new FailingAfterFirstWriteWallet(publicClient);
+    const writer = new SepoliaEfsWriter({
+      chainId: 11155111,
+      easAddress: EFS_SEPOLIA.eas,
+      indexerAddress: EFS_SEPOLIA.indexer,
+      publicClient,
+      walletClientFactory: () => agentWallet,
+      agentFundingTargetWei: 0n,
+      now: () => new Date("2026-07-08T00:00:00Z")
+    });
+
+    let partialReceipt: unknown;
+    const write = writer.writeFile(
+      {
+        path: "/agents/demo/status.json",
+        content: {
+          mode: "hash_only",
+          payload_sha256:
+            "sha256:43258cff783fe7036d8a43033f830adfc60ec037382473548ac742b888292777"
+        }
+      },
+      context
+    ).catch((error: unknown) => {
+      partialReceipt = (error as { partialReceipt?: unknown }).partialReceipt;
+      throw error;
+    });
+
+    await expect(write).rejects.toMatchObject({
+      partialReceipt: expect.objectContaining({
+        status: "failed",
+        efs: expect.objectContaining({
+          tx_hashes: [expect.stringMatching(/^0x[0-9a-f]{64}$/)]
+        })
+      })
+    });
+
+    await expect(writer.verifyReceipt(partialReceipt as never)).resolves.toMatchObject({
+      ok: false,
+      checks: expect.arrayContaining([
+        expect.objectContaining({ name: "sepolia_receipt_status", ok: false })
+      ])
+    });
+  });
 });
 
 function uid(n: number): Uid {
@@ -277,6 +368,15 @@ class FakeSepoliaWallet {
 class FailingSepoliaWallet {
   async writeContract(): Promise<Hex> {
     throw new Error("execution reverted");
+  }
+}
+
+class FailingAfterFirstWriteWallet extends FakeSepoliaWallet {
+  override async writeContract(args: { args?: readonly unknown[]; account?: { address?: Hex } }): Promise<Hex> {
+    if (this.contractWrites.length > 0) {
+      throw new Error("layer two reverted");
+    }
+    return super.writeContract(args);
   }
 }
 

@@ -39,6 +39,8 @@ interface SepoliaTransactionReceipt {
   blockNumber: bigint | null;
 }
 
+const ZERO_UID = `0x${"0".repeat(64)}` as const;
+
 export interface SepoliaPublicClient extends SepoliaReadClient {
   getBalance(args: { address: Hex }): Promise<bigint>;
   waitForTransactionReceipt(args: { hash: Hex }): Promise<SepoliaTransactionReceipt>;
@@ -75,9 +77,12 @@ export interface SepoliaWriterOptions {
 }
 
 export class SepoliaSubmitError extends Error {
-  constructor(message: string) {
+  readonly partialReceipt?: EfsScribeReceipt;
+
+  constructor(message: string, partialReceipt?: EfsScribeReceipt) {
     super(message);
     this.name = "SepoliaSubmitError";
+    this.partialReceipt = partialReceipt;
   }
 }
 
@@ -114,8 +119,6 @@ export class SepoliaEfsWriter implements EfsWriter {
       throw new SepoliaSubmitError("Write plan attester does not match the authenticated agent lens");
     }
 
-    await this.ensureAgentFunding(context);
-
     const preflight = await resolveSepoliaPreflight(plan, {
       publicClient: this.publicClient,
       indexerAddress: this.indexerAddress
@@ -133,105 +136,159 @@ export class SepoliaEfsWriter implements EfsWriter {
     if (agentAccount.address.toLowerCase() !== context.attester.address.toLowerCase()) {
       throw new SepoliaSubmitError("Derived agent account does not match the authenticated lens");
     }
+    await this.ensureAgentFunding(context);
+
     const walletClient = this.walletClientFactory(context.attester.privateKey);
     const txHashes: Hex[] = [];
     const blockNumbers: number[] = [];
-    for (const layer of uniqueLayers(plan)) {
-      const layerRequests = buildMultiAttestLayer(plan, layer, refs, { skipRefs });
-      if (layerRequests.flatRefs.length === 0) {
-        continue;
-      }
 
-      let txHash: Hex;
-      try {
-        txHash = await walletClient.writeContract({
-          account: agentAccount,
-          address: this.easAddress,
-          abi: EAS_MULTIATTEST_ABI,
-          functionName: "multiAttest",
-          args: [layerRequests.requests],
-          value: 0n,
-          chain: sepolia
-        });
-      } catch (error) {
-        throw new SepoliaSubmitError(
-          `Sepolia EAS multiAttest transaction was not sent: ${errorMessage(error)}`
-        );
-      }
-      const receipt = await this.confirmTransaction(txHash, "Sepolia EAS multiAttest");
-      const events = extractAttestedEventsFromLogs(
-        receipt.logs,
-        this.easAddress,
-        layerRequests.flatRefs.length
-      );
-      assertAttestedEventsMatch({
-        events,
-        expectedAttester: context.attester.address,
-        expectedSchemas: layerRequests.flatSchemas
-      });
-      const uids = events.map((event) => event.uid);
-      layerRequests.flatRefs.forEach((ref, index) => {
-        const uid = uids[index];
-        if (uid === undefined) {
-          throw new SepoliaSubmitError(`Missing EAS UID for planned ref ${ref}`);
+    try {
+      for (const layer of uniqueLayers(plan)) {
+        const layerRequests = buildMultiAttestLayer(plan, layer, refs, { skipRefs });
+        if (layerRequests.flatRefs.length === 0) {
+          continue;
         }
-        refs.set(ref, uid);
-      });
-      txHashes.push(txHash);
-      blockNumbers.push(toSafeBlockNumber(receipt.blockNumber));
+
+        let txHash: Hex;
+        try {
+          txHash = await walletClient.writeContract({
+            account: agentAccount,
+            address: this.easAddress,
+            abi: EAS_MULTIATTEST_ABI,
+            functionName: "multiAttest",
+            args: [layerRequests.requests],
+            value: 0n,
+            chain: sepolia
+          });
+        } catch (error) {
+          throw new SepoliaSubmitError(
+            `Sepolia EAS multiAttest transaction was not sent: ${errorMessage(error)}`
+          );
+        }
+        txHashes.push(txHash);
+        const receipt = await this.confirmTransaction(txHash, "Sepolia EAS multiAttest");
+        blockNumbers.push(toSafeBlockNumber(receipt.blockNumber));
+        const events = extractAttestedEventsFromLogs(
+          receipt.logs,
+          this.easAddress,
+          layerRequests.flatRefs.length
+        );
+        assertAttestedEventsMatch({
+          events,
+          expectedAttester: context.attester.address,
+          expectedSchemas: layerRequests.flatSchemas
+        });
+        const uids = events.map((event) => event.uid);
+        layerRequests.flatRefs.forEach((ref, index) => {
+          const uid = uids[index];
+          if (uid === undefined) {
+            throw new SepoliaSubmitError(`Missing EAS UID for planned ref ${ref}`);
+          }
+          refs.set(ref, uid);
+        });
+      }
+    } catch (error) {
+      if (txHashes.length === 0) {
+        throw error;
+      }
+      const message = `Sepolia write failed after partial submission: ${errorMessage(error)}`;
+      throw new SepoliaSubmitError(
+        message,
+        this.buildReceipt({
+          status: "failed",
+          plan,
+          context,
+          refs,
+          txHashes,
+          blockNumbers,
+          failureDetail: message
+        })
+      );
     }
 
+    return this.buildReceipt({
+      status: "confirmed",
+      plan,
+      context,
+      refs,
+      txHashes,
+      blockNumbers
+    });
+  }
+
+  private buildReceipt(input: {
+    status: "confirmed" | "failed";
+    plan: EfsWritePlan;
+    context: WriterContext;
+    refs: ReadonlyMap<string, Uid>;
+    txHashes: Hex[];
+    blockNumbers: number[];
+    failureDetail?: string;
+  }): EfsScribeReceipt {
     const checkedAt = this.now().toISOString();
-    const receiptId = `rcpt_${plan.canonicalRequestHash.slice("sha256:".length, "sha256:".length + 24)}`;
-    const receipt = ReceiptSchema.parse({
+    const receiptId = `rcpt_${input.plan.canonicalRequestHash.slice(
+      "sha256:".length,
+      "sha256:".length + 24
+    )}`;
+    const checks = sepoliaChecks({
+      chainId: this.chainId,
+      easAddress: this.easAddress,
+      txHashes: input.txHashes,
+      blockNumbers: input.blockNumbers,
+      refs: input.refs
+    });
+    if (input.status === "failed") {
+      checks.push({
+        name: "sepolia_write_failed",
+        ok: false,
+        detail: input.failureDetail
+      });
+    }
+    const dataUid = receiptUid(input.refs, "data", input.status);
+    const fileAnchorUid = receiptUid(input.refs, `anchor:${input.plan.path}`, input.status);
+    const placementPinUid = receiptUid(input.refs, "placement.pin", input.status);
+    return ReceiptSchema.parse({
       receipt_version: "efs-scribe-receipt/v1",
       receipt_id: receiptId,
-      status: "confirmed",
+      status: input.status,
       mode: "sepolia",
       operation: "file.upsert",
       created_at: checkedAt,
-      auth: context.auth,
+      auth: input.context.auth,
       agent_lens: {
-        attester: context.attester.address,
-        derivation: context.attester.derivation
+        attester: input.context.attester.address,
+        derivation: input.context.attester.derivation
       },
       integrity: {
-        payload_sha256: plan.payloadHash,
-        metadata_sha256: plan.metadataHash,
-        canonical_request_sha256: plan.canonicalRequestHash
+        payload_sha256: input.plan.payloadHash,
+        metadata_sha256: input.plan.metadataHash,
+        canonical_request_sha256: input.plan.canonicalRequestHash
       },
       efs: {
         network: "sepolia",
         chain_id: this.chainId,
         eas: this.easAddress,
-        tx_hashes: txHashes,
-        block_numbers: blockNumbers,
-        path: plan.path,
+        tx_hashes: input.txHashes,
+        block_numbers: input.blockNumbers,
+        path: input.plan.path,
         uids: {
-          data: mustGet(refs, "data"),
-          file_anchor: mustGet(refs, `anchor:${plan.path}`),
-          placement_pin: mustGet(refs, "placement.pin"),
-          mirrors: collectUids(refs, /^mirror\.\d+$/),
-          properties: collectPropertyPins(refs)
+          data: dataUid,
+          file_anchor: fileAnchorUid,
+          placement_pin: placementPinUid,
+          mirrors: collectUids(input.refs, /^mirror\.\d+$/),
+          properties: collectPropertyPins(input.refs)
         }
       },
       verification: {
         checked_at: checkedAt,
-        checks: sepoliaChecks({
-          chainId: this.chainId,
-          easAddress: this.easAddress,
-          txHashes,
-          blockNumbers,
-          refs
-        })
+        checks
       },
       links: {
-        self: `${context.publicBaseUrl}/v1/receipts/${receiptId}`,
-        verify: `${context.publicBaseUrl}/v1/verify`,
-        resolve: `${context.publicBaseUrl}/v1/resolve?path=${encodeURIComponent(plan.path)}`
+        self: `${input.context.publicBaseUrl}/v1/receipts/${receiptId}`,
+        verify: `${input.context.publicBaseUrl}/v1/verify`,
+        resolve: `${input.context.publicBaseUrl}/v1/resolve?path=${encodeURIComponent(input.plan.path)}`
       }
     });
-    return receipt;
   }
 
   async writeFile(input: FileWriteRequestInput, context: WriterContext): Promise<EfsScribeReceipt> {
@@ -259,6 +316,11 @@ export class SepoliaEfsWriter implements EfsWriter {
           ["placement.pin", parsed.data.efs.uids.placement_pin]
         ])
       }),
+      {
+        name: "sepolia_receipt_status",
+        ok: parsed.data.status === "confirmed",
+        detail: parsed.data.status === "confirmed" ? undefined : `status=${parsed.data.status}`
+      },
       { name: "sepolia_network", ok: parsed.data.efs.network === "sepolia" }
     ];
     return { ok: checks.every((check) => check.ok), checks };
@@ -315,6 +377,9 @@ export function createSepoliaEfsWriter(config: AppConfig): SepoliaEfsWriter {
   if (config.sepolia.agentFundingTargetWei > 0n && sponsorPrivateKey === undefined) {
     throw new Error("Sepolia writer requires SERVICE_SPONSOR_PRIVATE_KEY when agent funding is enabled");
   }
+  if (config.chainId !== sepolia.id) {
+    throw new Error("Sepolia writer requires EFS_CHAIN_ID=11155111");
+  }
 
   const publicClient = createPublicClient({
     chain: sepolia,
@@ -356,12 +421,19 @@ function uniqueLayers(plan: EfsWritePlan): number[] {
   );
 }
 
-function mustGet(refs: ReadonlyMap<string, Uid>, ref: string): Uid {
+function receiptUid(
+  refs: ReadonlyMap<string, Uid>,
+  ref: string,
+  status: "confirmed" | "failed"
+): Uid {
   const uid = refs.get(ref);
-  if (uid === undefined) {
-    throw new SepoliaSubmitError(`Missing submitted EFS ref ${ref}`);
+  if (uid !== undefined) {
+    return uid;
   }
-  return uid;
+  if (status === "failed") {
+    return ZERO_UID;
+  }
+  throw new SepoliaSubmitError(`Missing submitted EFS ref ${ref}`);
 }
 
 function collectUids(refs: ReadonlyMap<string, Uid>, pattern: RegExp): Uid[] {
@@ -415,7 +487,11 @@ function sepoliaChecks(input: {
 }
 
 function isUid(value: unknown): boolean {
-  return typeof value === "string" && /^0x[0-9a-fA-F]{64}$/.test(value);
+  return (
+    typeof value === "string" &&
+    /^0x[0-9a-fA-F]{64}$/.test(value) &&
+    value.toLowerCase() !== ZERO_UID
+  );
 }
 
 function toSafeBlockNumber(blockNumber: bigint | null): number {
