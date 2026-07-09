@@ -82,7 +82,8 @@ export async function registerRoutes(
     summary: "Agent-friendly EFS file write receipts and write-plan previews.",
     links: {
       health: "/health",
-      skill: "/SKILL.md",
+      skill: "/skill.md",
+      skill_canonical: "/SKILL.md",
       openapi: "/openapi.json",
       capabilities: "/v1/capabilities",
       plan_file: "/v1/files/plan",
@@ -92,6 +93,11 @@ export async function registerRoutes(
   }));
 
   app.get("/SKILL.md", async (_request, reply) => {
+    const skill = await readFile("SKILL.md", "utf8");
+    return reply.type("text/markdown; charset=utf-8").send(skill);
+  });
+
+  app.get("/skill.md", async (_request, reply) => {
     const skill = await readFile("SKILL.md", "utf8");
     return reply.type("text/markdown; charset=utf-8").send(skill);
   });
@@ -106,6 +112,7 @@ export async function registerRoutes(
       "/": { get: { summary: "Service index" } },
       "/health": { get: { summary: "Healthcheck" } },
       "/SKILL.md": { get: { summary: "Agent-facing skill instructions" } },
+      "/skill.md": { get: { summary: "Agent-facing skill instructions" } },
       "/v1/capabilities": { get: { summary: "Service capabilities" } },
       "/v1/files/plan": {
         post: {
@@ -286,6 +293,7 @@ export async function registerRoutes(
     public_endpoints: [
       "/",
       "/health",
+      "/skill.md",
       "/SKILL.md",
       "/openapi.json",
       "/v1/capabilities",

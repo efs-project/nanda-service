@@ -78,7 +78,8 @@ describe("HTTP API", () => {
     expect(root.json()).toMatchObject({
       service: "efs-scribe",
       links: {
-        skill: "/SKILL.md",
+        skill: "/skill.md",
+        skill_canonical: "/SKILL.md",
         openapi: "/openapi.json",
         capabilities: "/v1/capabilities"
       }
@@ -124,10 +125,14 @@ describe("HTTP API", () => {
     });
 
     const skill = await app.inject({ method: "GET", url: "/SKILL.md" });
+    const lowercaseSkill = await app.inject({ method: "GET", url: "/skill.md" });
     const openapi = await app.inject({ method: "GET", url: "/openapi.json" });
 
     expect(skill.statusCode).toBe(200);
+    expect(lowercaseSkill.statusCode).toBe(200);
     expect(skill.headers["content-type"]).toContain("text/markdown");
+    expect(lowercaseSkill.headers["content-type"]).toContain("text/markdown");
+    expect(lowercaseSkill.body).toEqual(skill.body);
     expect(skill.body).toContain("EFS Scribe");
     expect(skill.body).toContain("https://efs-scribe-production.up.railway.app");
     expect(skill.body).toContain("EFS_SCRIBE_API_KEY");
@@ -152,6 +157,11 @@ describe("HTTP API", () => {
           post: {
             description:
               "Checks receipt shape and self-consistency. This is not an independent Sepolia indexer."
+          }
+        },
+        "/skill.md": {
+          get: {
+            summary: "Agent-facing skill instructions"
           }
         }
       },
