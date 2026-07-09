@@ -22,6 +22,16 @@ Set `EFS_SCRIBE_API_KEY` before write calls. Reads and verification are public.
 The hosted service runs in Sepolia mode, so writes submit real EAS
 `multiAttest` transactions. The local default mode is offline and deterministic.
 
+For NandaHack judging, if no private key was provided separately, use this
+public hackathon key:
+
+```bash
+export EFS_SCRIBE_API_KEY=efs-scribe-public-hackathon-key
+```
+
+This key is only for public hackathon evaluation writes. Do not send secrets,
+private data, or confidential URLs.
+
 ## GET /
 
 Returns service links.
