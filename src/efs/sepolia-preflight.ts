@@ -132,6 +132,14 @@ export interface SepoliaPreflightResult {
   missingPathAnchors: PathAnchorPreflight[];
   transportAnchors: TransportAnchorPreflight[];
   activeVisibilityTagRefs: string[];
+  activePlacement?: ActivePlacementPreflight;
+}
+
+export interface ActivePlacementPreflight {
+  path: string;
+  fileAnchorUid: Uid;
+  placementPinUid: Uid;
+  dataUid: Uid;
 }
 
 export class SepoliaPreflightError extends Error {
@@ -177,6 +185,12 @@ export async function resolveSepoliaPreflight(
     edgeResolverAddress,
     pathAnchors
   );
+  const activePlacement = await resolveActivePlacement(
+    plan,
+    options.publicClient,
+    edgeResolverAddress,
+    pathAnchors
+  );
 
   return {
     resolvedRefs,
@@ -185,7 +199,8 @@ export async function resolveSepoliaPreflight(
     pathAnchors,
     missingPathAnchors: pathAnchors.filter((anchor) => !anchor.exists),
     transportAnchors,
-    activeVisibilityTagRefs
+    activeVisibilityTagRefs,
+    activePlacement
   };
 }
 
@@ -346,6 +361,38 @@ async function resolveActiveVisibilityTags(
   }
 
   return active;
+}
+
+async function resolveActivePlacement(
+  plan: EfsWritePlan,
+  publicClient: SepoliaReadClient,
+  edgeResolverAddress: Hex,
+  pathAnchors: PathAnchorPreflight[]
+): Promise<ActivePlacementPreflight | undefined> {
+  const fileAnchor = pathAnchors.find(
+    (anchor): anchor is PathAnchorPreflight & { uid: Uid } =>
+      anchor.path === plan.path && anchor.uid !== undefined
+  );
+  if (fileAnchor === undefined) {
+    return undefined;
+  }
+
+  const slot = await publicClient.readContract({
+    address: edgeResolverAddress,
+    abi: EFS_EDGE_RESOLVER_ABI,
+    functionName: "getActivePinSlot",
+    args: [fileAnchor.uid, plan.attester, EFS_SCHEMA_UIDS.DATA]
+  });
+  if (isZeroUid(slot.pinUID) || isZeroUid(slot.targetID)) {
+    return undefined;
+  }
+
+  return {
+    path: plan.path,
+    fileAnchorUid: fileAnchor.uid,
+    placementPinUid: slot.pinUID,
+    dataUid: slot.targetID
+  };
 }
 
 function uniqueTransports(requirements: PreflightRequirement[]): string[] {

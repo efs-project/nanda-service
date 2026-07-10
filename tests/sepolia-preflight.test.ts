@@ -146,6 +146,50 @@ describe("resolveSepoliaPreflight", () => {
     ]);
   });
 
+  it("detects an active file placement for the authenticated agent lens", async () => {
+    const root = uid(14);
+    const agents = uid(15);
+    const demo = uid(16);
+    const fileAnchor = uid(17);
+    const placementPin = uid(18);
+    const data = uid(19);
+    const client = new FakeReadClient(
+      root,
+      {
+        [pathKey(root, "agents")]: agents,
+        [pathKey(agents, "demo")]: demo,
+        [anchorKey(demo, "status.json", EFS_SCHEMA_UIDS.DATA)]: fileAnchor
+      },
+      {},
+      {
+        [pinSlotKey(fileAnchor, context.attester.address, EFS_SCHEMA_UIDS.DATA)]: {
+          pinUID: placementPin,
+          targetID: data
+        }
+      }
+    );
+    const plan = buildFileWritePlan(
+      {
+        path: "/agents/demo/status.json",
+        content: {
+          mode: "hash_only",
+          payload_sha256:
+            "sha256:43258cff783fe7036d8a43033f830adfc60ec037382473548ac742b888292777"
+        }
+      },
+      context
+    );
+
+    const result = await resolveSepoliaPreflight(plan, { publicClient: client });
+
+    expect(result.activePlacement).toEqual({
+      path: "/agents/demo/status.json",
+      fileAnchorUid: fileAnchor,
+      placementPinUid: placementPin,
+      dataUid: data
+    });
+  });
+
   it("rejects a zero root anchor and missing transport anchors", async () => {
     await expect(
       resolveSepoliaPreflight(
@@ -201,7 +245,8 @@ class FakeReadClient {
   constructor(
     private readonly root: Uid,
     private readonly paths: Record<string, Uid>,
-    private readonly activeTags: Record<string, boolean> = {}
+    private readonly activeTags: Record<string, boolean> = {},
+    private readonly pinSlots: Record<string, { pinUID: Uid; targetID: Uid }> = {}
   ) {}
 
   async readContract(args: { functionName: "rootAnchorUID"; args?: readonly unknown[] }): Promise<Uid>;
@@ -228,7 +273,13 @@ class FakeReadClient {
       return this.root;
     }
     if (args.functionName === "getActivePinSlot") {
-      return { pinUID: ZERO_UID, targetID: ZERO_UID };
+      const [definition, attester, targetSchema] = args.args ?? [];
+      return (
+        this.pinSlots[pinSlotKey(definition as Uid, attester as `0x${string}`, targetSchema as Uid)] ?? {
+          pinUID: ZERO_UID,
+          targetID: ZERO_UID
+        }
+      );
     }
     if (args.functionName === "hasActiveTagFromAny") {
       const [target, definition, attesters] = args.args ?? [];
@@ -267,4 +318,8 @@ function anchorKey(parent: Uid, name: string, forSchema: Uid): string {
 
 function tagKey(target: Uid, definition: Uid, attester: `0x${string}`): string {
   return `tag:${target}:${definition}:${attester.toLowerCase()}`;
+}
+
+function pinSlotKey(definition: Uid, attester: `0x${string}`, targetSchema: Uid): string {
+  return `pin:${definition}:${attester.toLowerCase()}:${targetSchema}`;
 }

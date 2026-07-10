@@ -13,6 +13,7 @@ import { SepoliaSubmitError } from "../efs/sepolia-writer.js";
 import { EfsWritePlanError, normalizeEfsPath } from "../efs/write-plan.js";
 import {
   EfsFileRemoveError,
+  EfsFileWriteConflictError,
   FileRemoveRequestSchema,
   FileWriteRequestSchema,
   type EfsWritePlan,
@@ -96,6 +97,10 @@ export async function registerRoutes(
     }
     if (error instanceof EfsFileRemoveError) {
       void reply.status(404).send({ error: "not_found", message: error.message });
+      return;
+    }
+    if (error instanceof EfsFileWriteConflictError) {
+      void reply.status(409).send({ error: "conflict", message: error.message });
       return;
     }
     if (error instanceof SepoliaPreflightError || error instanceof SepoliaSubmitError) {

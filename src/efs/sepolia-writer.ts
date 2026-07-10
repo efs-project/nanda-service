@@ -36,7 +36,7 @@ import type {
   VerificationResult,
   WriterContext
 } from "./writer.js";
-import { EfsFileRemoveError, FileRemoveRequestSchema } from "./writer.js";
+import { EfsFileRemoveError, EfsFileWriteConflictError, FileRemoveRequestSchema } from "./writer.js";
 import { buildFileWritePlan, collectPlannedMirrors, normalizeEfsPath } from "./write-plan.js";
 
 interface SepoliaTransactionReceipt {
@@ -138,6 +138,11 @@ export class SepoliaEfsWriter implements EfsWriter {
       indexerAddress: this.indexerAddress,
       edgeResolverAddress: EFS_SEPOLIA.edgeResolver
     });
+    if (preflight.activePlacement !== undefined) {
+      throw new EfsFileWriteConflictError(
+        "An active EFS file placement already exists at this path for this agent lens; use a fresh path or delete the existing placement with a delete-enabled key first"
+      );
+    }
     const refs = new Map<string, Uid>(preflight.resolvedRefs);
     const skipRefs = new Set<string>();
     for (const anchor of preflight.pathAnchors) {

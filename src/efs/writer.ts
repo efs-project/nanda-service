@@ -175,6 +175,13 @@ export class EfsFileRemoveError extends Error {
   }
 }
 
+export class EfsFileWriteConflictError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "EfsFileWriteConflictError";
+  }
+}
+
 function isStrictBase64(value: string): boolean {
   if (value.length % 4 !== 0) {
     return false;

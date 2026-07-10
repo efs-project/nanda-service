@@ -8,7 +8,12 @@ import { EFS_SEPOLIA, EFS_TRANSPORTS } from "../src/config/chains.js";
 import { parseEnv, type AppConfig } from "../src/config/env.js";
 import { OfflineEfsWriter } from "../src/efs/offline-writer.js";
 import { SepoliaSubmitError } from "../src/efs/sepolia-writer.js";
-import type { EfsWritePlan, EfsWriter, WriterContext } from "../src/efs/writer.js";
+import {
+  EfsFileWriteConflictError,
+  type EfsWritePlan,
+  type EfsWriter,
+  type WriterContext
+} from "../src/efs/writer.js";
 import { registerRoutes } from "../src/http/routes.js";
 import type { EfsScribeReceipt } from "../src/receipts/schema.js";
 import { buildApp } from "../src/server.js";
@@ -1137,6 +1142,22 @@ describe("HTTP API", () => {
 
     await app.close();
   });
+
+  it("reports active file placement write conflicts as client conflicts", async () => {
+    const app = await appWithWriter(new ConflictingSepoliaWriter());
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/files",
+      headers: { authorization: "Bearer local-scribe-key" },
+      payload: writeBody
+    });
+
+    expect(response.statusCode).toBe(409);
+    expect(response.json()).toMatchObject({ error: "conflict" });
+
+    await app.close();
+  });
 });
 
 const testConfig: AppConfig = {
@@ -1192,6 +1213,14 @@ class SlowOfflineWriter extends OfflineEfsWriter {
 class ThrowingSepoliaWriter extends OfflineEfsWriter {
   override async submitPlan(): Promise<EfsScribeReceipt> {
     throw new SepoliaSubmitError("Sepolia RPC unavailable");
+  }
+}
+
+class ConflictingSepoliaWriter extends OfflineEfsWriter {
+  override async submitPlan(): Promise<EfsScribeReceipt> {
+    throw new EfsFileWriteConflictError(
+      "An active EFS file placement already exists at this path for this agent lens"
+    );
   }
 }
 

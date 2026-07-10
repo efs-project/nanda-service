@@ -12,7 +12,7 @@ import type { AuthContext } from "../src/auth/subject.js";
 import { EFS_SCHEMA_UIDS, EFS_SEPOLIA } from "../src/config/chains.js";
 import { EAS_ATTESTED_EVENT } from "../src/efs/eas-requests.js";
 import { SepoliaEfsWriter, SepoliaSubmitError } from "../src/efs/sepolia-writer.js";
-import type { Hex, Uid } from "../src/efs/writer.js";
+import { EfsFileWriteConflictError, type Hex, type Uid } from "../src/efs/writer.js";
 
 const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000" as const;
 const ZERO_UID = `0x${"0".repeat(64)}` as const;
@@ -165,6 +165,54 @@ describe("SepoliaEfsWriter", () => {
     ]);
     expect(receipt.efs.uids.file_anchor).toBe(fileAnchor);
     expect(receipt.efs.uids.placement_pin).toMatch(/^0x[0-9a-f]{64}$/);
+  });
+
+  it("rejects writes to an existing active file placement before sending transactions", async () => {
+    const root = uid(51);
+    const agents = uid(52);
+    const demo = uid(53);
+    const fileAnchor = uid(54);
+    const placementPin = uid(55);
+    const data = uid(56);
+    const publicClient = new FakeSepoliaPublicClient(
+      root,
+      {
+        [pathKey(root, "agents")]: agents,
+        [pathKey(agents, "demo")]: demo,
+        [anchorKey(demo, "status.json", EFS_SCHEMA_UIDS.DATA)]: fileAnchor
+      },
+      {
+        [pinSlotKey(fileAnchor, context.attester.address, EFS_SCHEMA_UIDS.DATA)]: {
+          pinUID: placementPin,
+          targetID: data
+        }
+      }
+    );
+    const agentWallet = new FakeSepoliaWallet(publicClient);
+    const writer = new SepoliaEfsWriter({
+      chainId: 11155111,
+      easAddress: EFS_SEPOLIA.eas,
+      indexerAddress: EFS_SEPOLIA.indexer,
+      publicClient,
+      walletClientFactory: () => agentWallet,
+      agentFundingTargetWei: 0n,
+      now: () => new Date("2026-07-08T00:00:00Z")
+    });
+
+    await expect(
+      writer.writeFile(
+        {
+          path: "/agents/demo/status.json",
+          content: {
+            mode: "hash_only",
+            payload_sha256:
+              "sha256:43258cff783fe7036d8a43033f830adfc60ec037382473548ac742b888292777"
+          }
+        },
+        context
+      )
+    ).rejects.toThrow(EfsFileWriteConflictError);
+    expect(agentWallet.contractWrites).toHaveLength(0);
   });
 
   it("revokes the active file placement PIN when removing a file", async () => {
