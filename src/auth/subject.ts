@@ -5,6 +5,9 @@ export interface AuthContext {
   authenticated_subject: string;
   claimed_nanda_id?: string;
   auth_level: "write_key" | "signed_request" | "local_dev";
+  capabilities?: {
+    delete_files: boolean;
+  };
 }
 
 export function canonicalSubject(input: string): string {

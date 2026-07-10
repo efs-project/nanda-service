@@ -9,7 +9,9 @@ const DEFAULT_DERIVATION_SECRET = "offline-development-secret";
 
 const EnvSchema = z.object({
   EFS_SCRIBE_MODE: z.enum(["offline", "sepolia"]).default("offline"),
-  API_KEYS_JSON: z.string().default('{"local-scribe-key":"api-key:local-scribe-agent"}'),
+  API_KEYS_JSON: z
+    .string()
+    .default('{"local-scribe-key":{"subject":"api-key:local-scribe-agent","allow_delete":true}}'),
   AGENT_KEY_DERIVATION_SECRET: z.string().default(DEFAULT_DERIVATION_SECRET),
   PUBLIC_BASE_URL: z.string().url().default("http://localhost:3000"),
   PORT: z.coerce.number().int().positive().default(3000),

@@ -23,7 +23,7 @@ import {
   type WriterContext
 } from "../efs/writer.js";
 import { sha256Hex } from "../lib/hash.js";
-import { badRequest, conflict, HttpError, notFound, rateLimited } from "../lib/errors.js";
+import { badRequest, conflict, forbidden, HttpError, notFound, rateLimited } from "../lib/errors.js";
 import { InMemoryReceiptRepository } from "../receipts/repository.js";
 import { ReceiptSchema, type EfsScribeReceipt } from "../receipts/schema.js";
 import { addToIpfs, assertValidIpfsApiUrl, IpfsPinningError } from "../storage/ipfs.js";
@@ -67,12 +67,12 @@ export async function registerRoutes(
     capacity: WRITE_RATE_LIMIT_CAPACITY,
     refillTokens: WRITE_RATE_LIMIT_REFILL_TOKENS,
     refillIntervalMs: WRITE_RATE_LIMIT_REFILL_MS
-  });
+  }, "File write/remove rate limit exceeded");
   const ipfsRateLimiter = new TokenBucketRateLimiter({
     capacity: IPFS_UPLOAD_RATE_LIMIT_CAPACITY,
     refillTokens: IPFS_UPLOAD_RATE_LIMIT_REFILL_TOKENS,
     refillIntervalMs: IPFS_UPLOAD_RATE_LIMIT_REFILL_MS
-  });
+  }, "IPFS upload rate limit exceeded");
   const ipfsAddSemaphore = new AsyncSemaphore(IPFS_MAX_CONCURRENT_ADDS);
 
   app.addHook("onRequest", async (request) => {
@@ -401,6 +401,7 @@ export async function registerRoutes(
       refill_interval_ms: WRITE_RATE_LIMIT_REFILL_MS
     },
     writes_require_auth: true,
+    deletes_require_delete_enabled_key: true,
     efs: {
       sepolia: EFS_SEPOLIA,
       schema_uids: EFS_SCHEMA_UIDS
@@ -467,30 +468,19 @@ export async function registerRoutes(
     return sendSubmission(_reply, submission);
   });
 
-  app.post("/v1/files/delete", async (request: FastifyRequest) => {
+  app.post("/v1/files/delete", async (request: FastifyRequest, _reply: FastifyReply) => {
     const parsed = FileRemoveRequestSchema.parse(request.body);
     const context = writerContext(request, parsed, apiKeys, config);
-    const requestHash = originalRemoveRequestHash(parsed, context);
-    const idempotencyKey = parsed.options.idempotency_key;
-    if (idempotencyKey !== undefined) {
-      const existing = await receipts.getIdempotencyEntry(
-        context.auth.authenticated_subject,
-        idempotencyKey
-      );
-      if (existing !== undefined) {
-        assertSameOriginalIdempotentRequest(existing.requestHash, requestHash);
-        return { receipt: existing.receipt, links: existing.receipt.links };
-      }
-    }
-
-    writeRateLimiter.consume(context.auth.authenticated_subject);
-    const receipt = await writer.removeFile(parsed, context);
-    await receipts.save(receipt, {
-      authenticatedSubject: context.auth.authenticated_subject,
-      idempotencyKey,
-      idempotencyRequestHash: requestHash
+    requireFileDeleteCapability(context);
+    const submission = await removeWithOptionalIdempotency({
+      receipts,
+      pendingIdempotentSubmissions,
+      parsed,
+      writer,
+      context,
+      writeRateLimiter
     });
-    return { receipt, links: receipt.links };
+    return sendSubmission(_reply, submission);
   });
 
   app.get("/v1/receipts/:receiptId", async (request: FastifyRequest) => {
@@ -623,13 +613,14 @@ class TokenBucketRateLimiter {
       refillTokens: number;
       refillIntervalMs: number;
     },
+    private readonly errorMessage: string,
     private readonly now: () => number = () => Date.now()
   ) {}
 
   consume(key: string): void {
     const bucket = this.refilledBucket(key);
     if (bucket.tokens < 1) {
-      throw rateLimited("IPFS upload rate limit exceeded");
+      throw rateLimited(this.errorMessage);
     }
     bucket.tokens -= 1;
     this.buckets.set(key, bucket);
@@ -739,6 +730,12 @@ function planResponse(plan: unknown, config: AppConfig) {
   };
 }
 
+function requireFileDeleteCapability(context: WriterContext): void {
+  if (context.auth.capabilities?.delete_files !== true) {
+    throw forbidden("API key is not allowed to delete EFS files");
+  }
+}
+
 async function writeWithOptionalIdempotency(input: {
   receipts: InMemoryReceiptRepository;
   pendingIdempotentSubmissions: Map<string, PendingIdempotentSubmission>;
@@ -783,6 +780,79 @@ async function writeWithOptionalIdempotency(input: {
     return await result;
   } finally {
     input.pendingIdempotentSubmissions.delete(key);
+  }
+}
+
+async function removeWithOptionalIdempotency(input: {
+  receipts: InMemoryReceiptRepository;
+  pendingIdempotentSubmissions: Map<string, PendingIdempotentSubmission>;
+  parsed: FileRemoveRequest;
+  writer: EfsWriter;
+  context: WriterContext;
+  writeRateLimiter: TokenBucketRateLimiter;
+}): Promise<SubmissionResult> {
+  const idempotencyKey = input.parsed.options.idempotency_key;
+  const originalRequestHash = originalRemoveRequestHash(input.parsed, input.context);
+  if (idempotencyKey === undefined) {
+    input.writeRateLimiter.consume(input.context.auth.authenticated_subject);
+    return removeAndStore(input);
+  }
+
+  const key = idempotencyKeyFor(input.context.auth.authenticated_subject, idempotencyKey);
+  const existing = await input.receipts.getIdempotencyEntry(
+    input.context.auth.authenticated_subject,
+    idempotencyKey
+  );
+  if (existing !== undefined) {
+    assertSameOriginalIdempotentRequest(existing.requestHash, originalRequestHash);
+    return { receipt: existing.receipt };
+  }
+
+  const pending = input.pendingIdempotentSubmissions.get(key);
+  if (pending !== undefined) {
+    if (pending.originalRequestHash !== originalRequestHash) {
+      throw conflict("Idempotency key is already in use for a different request");
+    }
+    return pending.result;
+  }
+
+  input.writeRateLimiter.consume(input.context.auth.authenticated_subject);
+  const result = removeAndStore(input);
+  input.pendingIdempotentSubmissions.set(key, {
+    originalRequestHash,
+    result
+  });
+  try {
+    return await result;
+  } finally {
+    input.pendingIdempotentSubmissions.delete(key);
+  }
+}
+
+async function removeAndStore(input: {
+  receipts: InMemoryReceiptRepository;
+  parsed: FileRemoveRequest;
+  writer: EfsWriter;
+  context: WriterContext;
+}): Promise<SubmissionResult> {
+  try {
+    const receipt = await input.writer.removeFile(input.parsed, input.context);
+    await input.receipts.save(receipt, {
+      authenticatedSubject: input.context.auth.authenticated_subject,
+      idempotencyKey: input.parsed.options.idempotency_key,
+      idempotencyRequestHash: originalRemoveRequestHash(input.parsed, input.context)
+    });
+    return { receipt };
+  } catch (error) {
+    if (error instanceof SepoliaSubmitError && error.partialReceipt !== undefined) {
+      await input.receipts.save(error.partialReceipt, {
+        authenticatedSubject: input.context.auth.authenticated_subject,
+        idempotencyKey: input.parsed.options.idempotency_key,
+        idempotencyRequestHash: originalRemoveRequestHash(input.parsed, input.context)
+      });
+      return { receipt: error.partialReceipt, error };
+    }
+    throw error;
   }
 }
 

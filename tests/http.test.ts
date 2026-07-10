@@ -32,6 +32,8 @@ const writeBody = {
   }
 };
 
+const apiKeysWithDelete = '{"local-scribe-key":{"subject":"api-key:local-scribe-agent","allow_delete":true}}';
+
 const removeBody = {
   path: "/agents/demo/status.json",
   agent: {
@@ -307,7 +309,7 @@ describe("HTTP API", () => {
   it("removes and verifies an offline receipt", async () => {
     const app = await buildApp({
       mode: "offline",
-      apiKeysJson: '{"local-scribe-key":"api-key:local-scribe-agent"}',
+      apiKeysJson: apiKeysWithDelete,
       derivationSecret: "unit-test-secret",
       publicBaseUrl: "http://localhost:3000",
       logLevel: "silent"
@@ -359,6 +361,28 @@ describe("HTTP API", () => {
       receipt_id: receipt.receipt_id,
       mirrors: []
     });
+
+    await app.close();
+  });
+
+  it("rejects file removal for write-only API keys", async () => {
+    const app = await buildApp({
+      mode: "offline",
+      apiKeysJson: '{"local-scribe-key":"api-key:local-scribe-agent"}',
+      derivationSecret: "unit-test-secret",
+      publicBaseUrl: "http://localhost:3000",
+      logLevel: "silent"
+    });
+
+    const remove = await app.inject({
+      method: "POST",
+      url: "/v1/files/delete",
+      headers: { authorization: "Bearer local-scribe-key" },
+      payload: removeBody
+    });
+
+    expect(remove.statusCode).toBe(403);
+    expect(remove.json()).toMatchObject({ error: "forbidden" });
 
     await app.close();
   });
@@ -926,6 +950,33 @@ describe("HTTP API", () => {
     await app.close();
   });
 
+  it("deduplicates concurrent removals with the same idempotency key before submitting", async () => {
+    const writer = new SlowOfflineWriter({ now: () => new Date("2026-07-08T00:00:00Z") });
+    const app = await appWithWriter(writer);
+
+    const [first, second] = await Promise.all([
+      app.inject({
+        method: "POST",
+        url: "/v1/files/delete",
+        headers: { authorization: "Bearer local-scribe-key" },
+        payload: removeBody
+      }),
+      app.inject({
+        method: "POST",
+        url: "/v1/files/delete",
+        headers: { authorization: "Bearer local-scribe-key" },
+        payload: removeBody
+      })
+    ]);
+
+    expect(first.statusCode).toBe(200);
+    expect(second.statusCode).toBe(200);
+    expect(first.json().receipt).toEqual(second.json().receipt);
+    expect(writer.removeCount).toBe(1);
+
+    await app.close();
+  });
+
   it("rejects idempotency key reuse for a different request", async () => {
     const app = await buildApp({
       mode: "offline",
@@ -1090,7 +1141,7 @@ describe("HTTP API", () => {
 
 const testConfig: AppConfig = {
   mode: "offline",
-  apiKeysJson: '{"local-scribe-key":"api-key:local-scribe-agent"}',
+  apiKeysJson: apiKeysWithDelete,
   derivationSecret: "unit-test-secret",
   publicBaseUrl: "http://localhost:3000",
   port: 3000,
@@ -1113,6 +1164,7 @@ async function appWithWriter(writer: EfsWriter) {
 
 class SlowOfflineWriter extends OfflineEfsWriter {
   submitCount = 0;
+  removeCount = 0;
 
   override async submitPlan(
     plan: EfsWritePlan,
@@ -1123,6 +1175,17 @@ class SlowOfflineWriter extends OfflineEfsWriter {
       await new Promise((resolve) => setTimeout(resolve, 25));
     }
     return super.submitPlan(plan, context);
+  }
+
+  override async removeFile(
+    input: Parameters<OfflineEfsWriter["removeFile"]>[0],
+    context: WriterContext
+  ): Promise<EfsScribeReceipt> {
+    this.removeCount += 1;
+    if (this.removeCount === 1) {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    return super.removeFile(input, context);
   }
 }
 

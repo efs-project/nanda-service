@@ -14,6 +14,10 @@ export function unauthorized(message = "Invalid or missing API key"): HttpError 
   return new HttpError(401, "unauthorized", message);
 }
 
+export function forbidden(message: string): HttpError {
+  return new HttpError(403, "forbidden", message);
+}
+
 export function badRequest(message: string): HttpError {
   return new HttpError(400, "bad_request", message);
 }

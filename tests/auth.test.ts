@@ -20,8 +20,21 @@ describe("authenticateApiKey", () => {
       method: "api_key",
       authenticated_subject: "api-key:local-scribe-agent",
       claimed_nanda_id: "agent:claimed-demo",
-      auth_level: "write_key"
+      auth_level: "write_key",
+      capabilities: {
+        delete_files: false
+      }
     });
+  });
+
+  it("allows API key grants to opt into file deletion", () => {
+    const keys = parseApiKeys(
+      '{"local-scribe-key":{"subject":"api-key:local-scribe-agent","allow_delete":true}}'
+    );
+
+    const auth = authenticateApiKey("local-scribe-key", keys);
+
+    expect(auth.capabilities?.delete_files).toBe(true);
   });
 
   it("rejects unknown API keys", () => {

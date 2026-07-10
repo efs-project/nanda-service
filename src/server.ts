@@ -40,7 +40,16 @@ function createWriter(config: AppConfig): EfsWriter {
 
 function assertNoSampleAuthInSepolia(config: AppConfig): void {
   const parsed = JSON.parse(config.apiKeysJson) as Record<string, unknown>;
-  for (const [apiKey, subject] of Object.entries(parsed)) {
+  for (const [apiKey, grant] of Object.entries(parsed)) {
+    const subject =
+      typeof grant === "string"
+        ? grant
+        : grant !== null &&
+            typeof grant === "object" &&
+            !Array.isArray(grant) &&
+            typeof (grant as Record<string, unknown>).subject === "string"
+          ? ((grant as Record<string, unknown>).subject as string)
+          : undefined;
     const isCurrentSample = apiKey === "local-scribe-key" || subject === "api-key:local-scribe-agent";
     if (isCurrentSample) {
       throw new Error("Sepolia mode requires deployment API keys; replace the sample API key first");

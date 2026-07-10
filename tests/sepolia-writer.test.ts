@@ -270,6 +270,75 @@ describe("SepoliaEfsWriter", () => {
     expect(agentWallet.contractWrites).toHaveLength(0);
   });
 
+  it("attaches a failed receipt when a removal transaction reverts after broadcast", async () => {
+    const root = uid(28);
+    const agents = uid(29);
+    const demo = uid(30);
+    const fileAnchor = uid(31);
+    const placementPin = uid(32);
+    const data = uid(33);
+    const publicClient = new FakeSepoliaPublicClient(
+      root,
+      {
+        [pathKey(root, "agents")]: agents,
+        [pathKey(agents, "demo")]: demo,
+        [anchorKey(demo, "status.json", EFS_SCHEMA_UIDS.DATA)]: fileAnchor
+      },
+      {
+        [pinSlotKey(fileAnchor, context.attester.address, EFS_SCHEMA_UIDS.DATA)]: {
+          pinUID: placementPin,
+          targetID: data
+        }
+      },
+      "reverted"
+    );
+    const agentWallet = new FakeSepoliaWallet(publicClient);
+    const writer = new SepoliaEfsWriter({
+      chainId: 11155111,
+      easAddress: EFS_SEPOLIA.eas,
+      indexerAddress: EFS_SEPOLIA.indexer,
+      publicClient,
+      walletClientFactory: () => agentWallet,
+      agentFundingTargetWei: 0n,
+      now: () => new Date("2026-07-08T00:00:00Z")
+    });
+
+    let partialReceipt: unknown;
+    const remove = writer.removeFile(
+      {
+        path: "/agents/demo/status.json",
+        agent: { claimed_nanda_id: "agent:demo" },
+        options: { idempotency_key: "remove-status-reverted-001" }
+      },
+      context
+    ).catch((error: unknown) => {
+      partialReceipt = (error as { partialReceipt?: unknown }).partialReceipt;
+      throw error;
+    });
+
+    await expect(remove).rejects.toMatchObject({
+      partialReceipt: expect.objectContaining({
+        status: "failed",
+        operation: "file.remove",
+        efs: expect.objectContaining({
+          tx_hashes: [expect.stringMatching(/^0x[0-9a-f]{64}$/)],
+          block_numbers: []
+        })
+      })
+    });
+    expect((partialReceipt as { verification: { checks: unknown[] } }).verification.checks).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ name: "sepolia_remove_failed", ok: false })
+      ])
+    );
+    await expect(writer.verifyReceipt(partialReceipt as never)).resolves.toMatchObject({
+      ok: false,
+      checks: expect.arrayContaining([
+        expect.objectContaining({ name: "sepolia_receipt_status", ok: false })
+      ])
+    });
+  });
+
   it("classifies pre-send viem failures as Sepolia submit errors", async () => {
     const root = uid(21);
     const agents = uid(22);
@@ -425,7 +494,8 @@ class FakeSepoliaPublicClient {
   constructor(
     private readonly root: Uid,
     private readonly paths: Record<string, Uid>,
-    private readonly pinSlots: Record<string, { pinUID: Uid; targetID: Uid }> = {}
+    private readonly pinSlots: Record<string, { pinUID: Uid; targetID: Uid }> = {},
+    private readonly receiptStatus: "success" | "reverted" = "success"
   ) {}
 
   async readContract(args: { functionName: "rootAnchorUID"; args?: readonly unknown[] }): Promise<Uid>;
@@ -480,14 +550,14 @@ class FakeSepoliaPublicClient {
   }
 
   async waitForTransactionReceipt(args: { hash: Hex }): Promise<{
-    status: "success";
+    status: "success" | "reverted";
     logs: Log[];
     blockNumber: bigint;
   }> {
     const schemas = this.pendingReceipts.get(args.hash) ?? [];
     const logs = schemas.map((schema) => attestedLog(EFS_SEPOLIA.eas, uid(this.nextUid++), schema));
     return {
-      status: "success",
+      status: this.receiptStatus,
       logs,
       blockNumber: this.nextBlock++
     };

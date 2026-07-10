@@ -16,7 +16,8 @@ npm install
 npm run dev
 ```
 
-The local default API key is `local-scribe-key`.
+The local default API key is `local-scribe-key`. The default local key is
+delete-enabled; public hosted keys should usually omit `allow_delete`.
 
 Set `IPFS_API_URL` to a Kubo-compatible API such as
 `http://127.0.0.1:5001/api/v0` when you want inline bytes pinned to IPFS by
@@ -139,6 +140,15 @@ IPFS_API_URL=<kubo api url, recommended for retrievable files>
 # Optional, only if the IPFS API is protected by a reverse proxy.
 IPFS_API_AUTHORIZATION=<literal Authorization header value>
 ```
+
+Use an object grant when a key should be allowed to delete files:
+
+```bash
+API_KEYS_JSON={"your-private-key":{"subject":"api-key:your-agent","allow_delete":true}}
+```
+
+String grants, such as `{"public-key":"api-key:public-agent"}`, can plan and
+write but cannot delete. This is the safer shape for shared hackathon keys.
 
 On Railway, set `PUBLIC_BASE_URL` to the public Railway domain so receipt links
 point back to the hosted service instead of localhost.

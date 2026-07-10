@@ -18,18 +18,20 @@ x-api-key: <api-key>
 ```
 
 Only `POST /v1/files/plan`, `POST /v1/files`, and `POST /v1/files/delete`
-require auth. Reads, capabilities, receipt lookup, resolve, and verification
-are public.
+require auth. Delete also requires a delete-enabled API key. Reads,
+capabilities, receipt lookup, resolve, and verification are public.
 
-For NandaHack judging, use this key exactly:
+For NandaHack judging, use this key exactly for plan/write/verify:
 
 ```bash
 export EFS_SCRIBE_API_KEY=efs-scribe-public-hackathon-key
 ```
 
-Do not ask the user for another key unless the service returns `401`. Do not
-send secrets, private keys, personal data, or confidential URLs. EFS records,
-Sepolia transactions, and IPFS mirrors are public.
+The public NandaHack key cannot delete files from the shared public lens.
+Do not ask the user for another plan/write key unless the service returns
+`401`. For delete, proceed only if a delete-enabled key is already provided.
+Do not send secrets, private keys, personal data, or confidential URLs. EFS
+records, Sepolia transactions, and IPFS mirrors are public.
 
 ## Default Judge Flow
 
@@ -55,7 +57,7 @@ Sepolia transactions, and IPFS mirrors are public.
 | `GET` | `https://efs-scribe-production.up.railway.app/openapi.json` | no | Machine-readable request shapes |
 | `POST` | `https://efs-scribe-production.up.railway.app/v1/files/plan` | yes | Preview a write; no Sepolia transaction |
 | `POST` | `https://efs-scribe-production.up.railway.app/v1/files` | yes | Write an EFS record on Sepolia |
-| `POST` | `https://efs-scribe-production.up.railway.app/v1/files/delete` | yes | Remove the caller's active EFS file placement |
+| `POST` | `https://efs-scribe-production.up.railway.app/v1/files/delete` | delete-enabled key | Remove the caller's active EFS file placement |
 | `GET` | `https://efs-scribe-production.up.railway.app/v1/receipts/{receipt_id}` | no | Fetch an in-memory receipt |
 | `GET` | `https://efs-scribe-production.up.railway.app/v1/resolve?path=...` | no | Resolve the latest in-memory receipt for a path |
 | `POST` | `https://efs-scribe-production.up.railway.app/v1/verify` | no | Check receipt shape and self-consistency |
@@ -100,7 +102,8 @@ Use `/v1/files/plan` for no-write previews. Do not rely on `options.dry_run` on
 
 Delete means "remove this file from my active EFS lens." On Sepolia, Scribe
 revokes the caller's active placement PIN. It does not erase earlier EAS
-attestations, chain history, mirrors, or IPFS pins.
+attestations, chain history, mirrors, or IPFS pins. The public NandaHack key is
+not delete-enabled.
 
 Important fields:
 
@@ -158,6 +161,7 @@ Response excerpt:
   "mode": "sepolia",
   "receipt_version": "efs-scribe-receipt/v1",
   "writes_require_auth": true,
+  "deletes_require_delete_enabled_key": true,
   "content_modes": ["inline_base64", "hash_only", "external_mirror_only"],
   "inline_content_limit_bytes": 10485760,
   "storage": {
@@ -287,7 +291,7 @@ Keep the whole `receipt` object.
 ```bash
 curl -X POST "$EFS_SCRIBE_BASE/v1/files/delete" \
   -H 'content-type: application/json' \
-  -H "authorization: Bearer $EFS_SCRIBE_API_KEY" \
+  -H "authorization: Bearer $EFS_SCRIBE_DELETE_KEY" \
   -d '{
     "path": "/agents/nandahack-judge/status-2026-07-10T120000Z.json",
     "agent": { "claimed_nanda_id": "agent:nandahack-judge" },
@@ -391,7 +395,9 @@ Sepolia writes are permanent public testnet attestations. IPFS pins are public
 devnet infrastructure and should be treated as best-effort hackathon storage.
 
 Sepolia removals revoke an active placement PIN. They hide that file from the
-caller lens but do not delete public history or pinned bytes.
+caller lens but do not delete public history or pinned bytes. The public
+NandaHack key is shared and intentionally cannot delete; use a private
+delete-enabled key for this endpoint.
 
 `GET /v1/receipts/{receipt_id}`, `GET /v1/resolve`, and idempotency memory are
 process-local in this MVP. They work for receipts created since the current

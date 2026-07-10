@@ -356,8 +356,29 @@ export class SepoliaEfsWriter implements EfsWriter {
         `Sepolia EAS multiRevoke transaction was not sent: ${errorMessage(error)}`
       );
     }
-    const receipt = await this.confirmTransaction(txHash, "Sepolia EAS multiRevoke");
+    let receipt: SepoliaTransactionReceipt;
+    try {
+      receipt = await this.confirmTransaction(txHash, "Sepolia EAS multiRevoke");
+    } catch (error) {
+      const message = `Sepolia remove failed after submission: ${errorMessage(error)}`;
+      throw new SepoliaSubmitError(
+        message,
+        this.buildRemoveReceipt({
+          status: "failed",
+          context,
+          input: parsed,
+          path: normalizedPath.canonicalPath,
+          dataUid: resolved.dataUid,
+          fileAnchorUid: resolved.fileAnchorUid,
+          placementPinUid: resolved.placementPinUid,
+          txHashes: [txHash],
+          blockNumbers: [],
+          failureDetail: message
+        })
+      );
+    }
     return this.buildRemoveReceipt({
+      status: "confirmed",
       context,
       input: parsed,
       path: normalizedPath.canonicalPath,
@@ -449,6 +470,7 @@ export class SepoliaEfsWriter implements EfsWriter {
   }
 
   private buildRemoveReceipt(input: {
+    status: "confirmed" | "failed";
     context: WriterContext;
     input: { options: { idempotency_key?: string } };
     path: string;
@@ -457,6 +479,7 @@ export class SepoliaEfsWriter implements EfsWriter {
     placementPinUid: Uid;
     txHashes: Hex[];
     blockNumbers: number[];
+    failureDetail?: string;
   }): EfsScribeReceipt {
     const checkedAt = this.now().toISOString();
     const canonicalRequestHash = sha256Hex({
@@ -469,10 +492,29 @@ export class SepoliaEfsWriter implements EfsWriter {
       "sha256:".length,
       "sha256:".length + 24
     )}`;
+    const checks = sepoliaChecks({
+      chainId: this.chainId,
+      easAddress: this.easAddress,
+      txHashes: input.txHashes,
+      blockNumbers: input.blockNumbers,
+      refs: new Map([
+        ["data", input.dataUid],
+        [`anchor:${input.path}`, input.fileAnchorUid],
+        ["placement.pin", input.placementPinUid]
+      ])
+    });
+    if (input.status === "failed") {
+      checks.push({
+        name: "sepolia_remove_failed",
+        ok: false,
+        detail: input.failureDetail
+      });
+    }
+
     return ReceiptSchema.parse({
       receipt_version: "efs-scribe-receipt/v1",
       receipt_id: receiptId,
-      status: "confirmed",
+      status: input.status,
       mode: "sepolia",
       operation: "file.remove",
       created_at: checkedAt,
@@ -509,17 +551,7 @@ export class SepoliaEfsWriter implements EfsWriter {
       },
       verification: {
         checked_at: checkedAt,
-        checks: sepoliaChecks({
-          chainId: this.chainId,
-          easAddress: this.easAddress,
-          txHashes: input.txHashes,
-          blockNumbers: input.blockNumbers,
-          refs: new Map([
-            ["data", input.dataUid],
-            [`anchor:${input.path}`, input.fileAnchorUid],
-            ["placement.pin", input.placementPinUid]
-          ])
-        })
+        checks
       },
       links: {
         self: `${input.context.publicBaseUrl}/v1/receipts/${receiptId}`,
