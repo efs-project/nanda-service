@@ -80,6 +80,25 @@ describe("parseEnv", () => {
     expect(config.sepolia.agentFundingTargetWei).toBe(0n);
   });
 
+  it("rounds positive Sepolia funding targets up to the safe minimum", () => {
+    const config = parseEnv({
+      EFS_SCRIBE_MODE: "sepolia",
+      API_KEYS_JSON: '{"local-scribe-key":"api-key:local-scribe-agent"}',
+      AGENT_KEY_DERIVATION_SECRET: "realistic-non-default-derivation-secret",
+      PUBLIC_BASE_URL: "http://localhost:3000",
+      PORT: "3000",
+      LOG_LEVEL: "silent",
+      EFS_CHAIN_ID: "11155111",
+      EFS_EAS_ADDRESS: EFS_SEPOLIA.eas,
+      SEPOLIA_RPC_URL: "https://sepolia.example.test/rpc",
+      SEPOLIA_AGENT_FUNDING_TARGET_WEI: "1",
+      SERVICE_SPONSOR_PRIVATE_KEY: `0x${"1".repeat(64)}`,
+      RECEIPT_SIGNER_PRIVATE_KEY: ""
+    });
+
+    expect(config.sepolia.agentFundingTargetWei).toBe(50_000_000_000_000_000n);
+  });
+
   it("does not mark Sepolia mode ready with a non-Sepolia chain id", () => {
     const config = parseEnv({
       EFS_SCRIBE_MODE: "sepolia",

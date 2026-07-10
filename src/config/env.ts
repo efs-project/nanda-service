@@ -6,6 +6,9 @@ import { SEPOLIA_CHAIN_ID, SEPOLIA_EAS_ADDRESS } from "./chains.js";
 import type { WriterMode } from "../efs/writer.js";
 
 const DEFAULT_DERIVATION_SECRET = "offline-development-secret";
+const MIN_SEPOLIA_AGENT_FUNDING_TARGET_WEI = 50_000_000_000_000_000n;
+const DEFAULT_SEPOLIA_AGENT_FUNDING_TARGET_WEI =
+  MIN_SEPOLIA_AGENT_FUNDING_TARGET_WEI.toString();
 
 const EnvSchema = z.object({
   EFS_SCRIBE_MODE: z.enum(["offline", "sepolia"]).default("offline"),
@@ -25,7 +28,7 @@ const EnvSchema = z.object({
     .regex(/^0x[0-9a-fA-F]{40}$/)
     .default(SEPOLIA_EAS_ADDRESS),
   SEPOLIA_RPC_URL: z.string().default(""),
-  SEPOLIA_AGENT_FUNDING_TARGET_WEI: z.string().default("50000000000000000"),
+  SEPOLIA_AGENT_FUNDING_TARGET_WEI: z.string().default(DEFAULT_SEPOLIA_AGENT_FUNDING_TARGET_WEI),
   SERVICE_SPONSOR_PRIVATE_KEY: z.string().default(""),
   RECEIPT_SIGNER_PRIVATE_KEY: z.string().default("")
 });
@@ -81,7 +84,9 @@ export function parseEnv(env: NodeJS.ProcessEnv = process.env): AppConfig {
 function buildSepoliaConfig(parsed: z.infer<typeof EnvSchema>): SepoliaConfig {
   const missing: string[] = [];
   const rpcUrl = usableUrl(parsed.SEPOLIA_RPC_URL);
-  const agentFundingTargetWei = parseWei(parsed.SEPOLIA_AGENT_FUNDING_TARGET_WEI);
+  const agentFundingTargetWei = normalizeAgentFundingTarget(
+    parseWei(parsed.SEPOLIA_AGENT_FUNDING_TARGET_WEI)
+  );
   const serviceSponsorPrivateKey = usablePrivateKey(parsed.SERVICE_SPONSOR_PRIVATE_KEY);
   const receiptSignerPrivateKey = usablePrivateKey(parsed.RECEIPT_SIGNER_PRIVATE_KEY);
 
@@ -139,6 +144,15 @@ function parseWei(value: string): bigint {
     throw new Error("SEPOLIA_AGENT_FUNDING_TARGET_WEI must be a non-negative integer");
   }
   return BigInt(trimmed);
+}
+
+function normalizeAgentFundingTarget(value: bigint): bigint {
+  if (value === 0n) {
+    return 0n;
+  }
+  return value < MIN_SEPOLIA_AGENT_FUNDING_TARGET_WEI
+    ? MIN_SEPOLIA_AGENT_FUNDING_TARGET_WEI
+    : value;
 }
 
 function isPlaceholderSecret(value: string): boolean {

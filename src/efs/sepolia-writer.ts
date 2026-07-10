@@ -576,25 +576,40 @@ export class SepoliaEfsWriter implements EfsWriter {
     }
 
     const balance = await this.publicClient.getBalance({ address: context.attester.address });
-    if (balance >= this.agentFundingTargetWei) {
+    const refillThresholdWei = (this.agentFundingTargetWei + 1n) / 2n;
+    if (balance >= refillThresholdWei) {
       return;
     }
 
     const value = this.agentFundingTargetWei - balance;
-    let txHash: Hex;
-    try {
-      txHash = await this.sponsorWallet.sendTransaction({
-        account: this.sponsorAccount,
-        chain: sepolia,
-        to: context.attester.address,
-        value
-      });
-    } catch (error) {
-      throw new SepoliaSubmitError(
-        `Sepolia agent wallet funding transaction was not sent: ${errorMessage(error)}`
-      );
-    }
+    const txHash = await this.sendFundingTransactionWithRetry(context, value);
     await this.confirmTransaction(txHash, "Sepolia agent wallet funding");
+  }
+
+  private async sendFundingTransactionWithRetry(
+    context: WriterContext,
+    value: bigint
+  ): Promise<Hex> {
+    const maxAttempts = 3;
+    let lastError: unknown;
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+      try {
+        return await this.sponsorWallet!.sendTransaction!({
+          account: this.sponsorAccount,
+          chain: sepolia,
+          to: context.attester.address,
+          value
+        });
+      } catch (error) {
+        lastError = error;
+        if (attempt < maxAttempts) {
+          await sleep(250 * attempt);
+        }
+      }
+    }
+    throw new SepoliaSubmitError(
+      `Sepolia agent wallet funding transaction was not sent: ${errorMessage(lastError)}`
+    );
   }
 
   private async confirmTransaction(hash: Hex, label: string): Promise<SepoliaTransactionReceipt> {
@@ -744,6 +759,10 @@ function toSafeBlockNumber(blockNumber: bigint | null): number {
     throw new SepoliaSubmitError("Sepolia receipt block number cannot be represented safely");
   }
   return Number(blockNumber);
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function errorMessage(error: unknown): string {
