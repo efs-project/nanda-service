@@ -16,11 +16,22 @@ import {
   type EfsWritePlan,
   type EfsWriter,
   type FileWriteRequest,
+  MAX_INLINE_CONTENT_BYTES,
   type WriterContext
 } from "../efs/writer.js";
-import { conflict, HttpError, notFound } from "../lib/errors.js";
+import { sha256Hex } from "../lib/hash.js";
+import { badRequest, conflict, HttpError, notFound, rateLimited } from "../lib/errors.js";
 import { InMemoryReceiptRepository } from "../receipts/repository.js";
 import { ReceiptSchema, type EfsScribeReceipt } from "../receipts/schema.js";
+import { addToIpfs, assertValidIpfsApiUrl, IpfsPinningError } from "../storage/ipfs.js";
+
+const IPFS_UPLOAD_RATE_LIMIT_CAPACITY = 10;
+const IPFS_UPLOAD_RATE_LIMIT_REFILL_TOKENS = 5;
+const IPFS_UPLOAD_RATE_LIMIT_REFILL_MS = 60_000;
+const IPFS_MAX_CONCURRENT_ADDS = 2;
+const WRITE_RATE_LIMIT_CAPACITY = 10;
+const WRITE_RATE_LIMIT_REFILL_TOKENS = 5;
+const WRITE_RATE_LIMIT_REFILL_MS = 60_000;
 
 const ResolveQuerySchema = z.object({
   path: z.string().min(1),
@@ -37,7 +48,7 @@ interface SubmissionResult {
 }
 
 interface PendingIdempotentSubmission {
-  canonicalRequestHash: string;
+  originalRequestHash: string;
   result: Promise<SubmissionResult>;
 }
 
@@ -49,6 +60,23 @@ export async function registerRoutes(
   const apiKeys = parseApiKeys(config.apiKeysJson);
   const receipts = new InMemoryReceiptRepository();
   const pendingIdempotentSubmissions = new Map<string, PendingIdempotentSubmission>();
+  const writeRateLimiter = new TokenBucketRateLimiter({
+    capacity: WRITE_RATE_LIMIT_CAPACITY,
+    refillTokens: WRITE_RATE_LIMIT_REFILL_TOKENS,
+    refillIntervalMs: WRITE_RATE_LIMIT_REFILL_MS
+  });
+  const ipfsRateLimiter = new TokenBucketRateLimiter({
+    capacity: IPFS_UPLOAD_RATE_LIMIT_CAPACITY,
+    refillTokens: IPFS_UPLOAD_RATE_LIMIT_REFILL_TOKENS,
+    refillIntervalMs: IPFS_UPLOAD_RATE_LIMIT_REFILL_MS
+  });
+  const ipfsAddSemaphore = new AsyncSemaphore(IPFS_MAX_CONCURRENT_ADDS);
+
+  app.addHook("onRequest", async (request) => {
+    if (isAuthenticatedWriteRoute(request.method, request.url)) {
+      authenticateApiKey(extractApiKey(request), apiKeys);
+    }
+  });
 
   app.setErrorHandler((error, _request, reply) => {
     if (error instanceof HttpError) {
@@ -65,6 +93,10 @@ export async function registerRoutes(
     }
     if (error instanceof SepoliaPreflightError || error instanceof SepoliaSubmitError) {
       void reply.status(503).send(sepoliaErrorBody(error));
+      return;
+    }
+    if (error instanceof IpfsPinningError) {
+      void reply.status(503).send({ error: "ipfs_pin_error", message: error.message });
       return;
     }
     void reply.status(500).send({ error: "internal_error", message: "Unexpected service error" });
@@ -206,6 +238,7 @@ export async function registerRoutes(
               type: "string",
               example: "sha256:2689367b205c16ce32b480e6f8ebbb8a9f044d455c6ddfb140bfd6a500933602"
             },
+            size_bytes: { type: "integer", minimum: 0 },
             content_type: { type: "string", example: "application/json" }
           }
         },
@@ -246,7 +279,14 @@ export async function registerRoutes(
               type: "object",
               properties: {
                 dry_run: { type: "boolean", default: false },
-                idempotency_key: { type: "string", maxLength: 128 }
+                idempotency_key: { type: "string", maxLength: 128 },
+                storage: {
+                  type: "string",
+                  enum: ["auto", "ipfs", "metadata_only"],
+                  default: "auto",
+                  description:
+                    "For inline_base64 content, auto pins to IPFS when configured, ipfs requires service-side pinning, and metadata_only skips service-side pinning."
+                }
               }
             }
           }
@@ -285,6 +325,27 @@ export async function registerRoutes(
       agent_funding_target_wei: config.sepolia.agentFundingTargetWei.toString()
     },
     content_modes: ["inline_base64", "hash_only", "external_mirror_only"],
+    inline_content_limit_bytes: MAX_INLINE_CONTENT_BYTES,
+    storage: {
+      strategies: ["auto", "ipfs", "metadata_only"],
+      default_for_inline_base64: config.ipfs.apiUrl === undefined ? "metadata_only" : "ipfs",
+      ipfs: {
+        configured: config.ipfs.apiUrl !== undefined,
+        mirror_transport: "ipfs",
+        plan_previews_pin: false,
+        rate_limit: {
+          capacity: IPFS_UPLOAD_RATE_LIMIT_CAPACITY,
+          refill_tokens: IPFS_UPLOAD_RATE_LIMIT_REFILL_TOKENS,
+          refill_interval_ms: IPFS_UPLOAD_RATE_LIMIT_REFILL_MS
+        },
+        max_concurrent_adds: IPFS_MAX_CONCURRENT_ADDS
+      }
+    },
+    write_rate_limit: {
+      capacity: WRITE_RATE_LIMIT_CAPACITY,
+      refill_tokens: WRITE_RATE_LIMIT_REFILL_TOKENS,
+      refill_interval_ms: WRITE_RATE_LIMIT_REFILL_MS
+    },
     writes_require_auth: true,
     efs: {
       sepolia: EFS_SEPOLIA,
@@ -307,7 +368,16 @@ export async function registerRoutes(
   app.post("/v1/files/plan", async (request: FastifyRequest) => {
     const parsed = FileWriteRequestSchema.parse(request.body);
     const context = writerContext(request, parsed, apiKeys, config);
-    const plan = await writer.planFile(parsed, context);
+    const prepared = await prepareFileWriteRequest(parsed, config, {
+      onlyHashIpfs: true,
+      authenticatedSubject: context.auth.authenticated_subject,
+      ipfsRateLimiter,
+      ipfsAddSemaphore,
+      validatePreparedRequest: async (candidate) => {
+        await writer.planFile(candidate, context);
+      }
+    });
+    const plan = await writer.planFile(prepared, context);
 
     return planResponse(plan, config);
   });
@@ -315,18 +385,30 @@ export async function registerRoutes(
   app.post("/v1/files", async (request: FastifyRequest, _reply: FastifyReply) => {
     const parsed = FileWriteRequestSchema.parse(request.body);
     const context = writerContext(request, parsed, apiKeys, config);
-    const plan = await writer.planFile(parsed, context);
     if (parsed.options.dry_run) {
+      const prepared = await prepareFileWriteRequest(parsed, config, {
+        onlyHashIpfs: true,
+        authenticatedSubject: context.auth.authenticated_subject,
+        ipfsRateLimiter,
+        ipfsAddSemaphore,
+        validatePreparedRequest: async (candidate) => {
+          await writer.planFile(candidate, context);
+        }
+      });
+      const plan = await writer.planFile(prepared, context);
       return planResponse(plan, config);
     }
 
-    const submission = await submitWithIdempotency({
+    const submission = await writeWithOptionalIdempotency({
+      parsed,
+      config,
       receipts,
       pendingIdempotentSubmissions,
       writer,
-      plan,
       context,
-      idempotencyKey: parsed.options.idempotency_key
+      writeRateLimiter,
+      ipfsRateLimiter,
+      ipfsAddSemaphore
     });
     return sendSubmission(_reply, submission);
   });
@@ -354,6 +436,7 @@ export async function registerRoutes(
       attester: receipt.agent_lens.attester,
       receipt_id: receipt.receipt_id,
       payload_sha256: receipt.integrity.payload_sha256,
+      mirrors: receipt.efs.mirrors,
       uids: receipt.efs.uids,
       links: receipt.links
     };
@@ -364,6 +447,171 @@ export async function registerRoutes(
     const receipt = body.receipt;
     return writer.verifyReceipt(receipt);
   });
+}
+
+async function prepareFileWriteRequest(
+  parsed: FileWriteRequest,
+  config: AppConfig,
+  options: {
+    onlyHashIpfs: boolean;
+    authenticatedSubject: string;
+    ipfsRateLimiter: TokenBucketRateLimiter;
+    ipfsAddSemaphore: AsyncSemaphore;
+    validatePreparedRequest?: (candidate: FileWriteRequest) => Promise<void>;
+  }
+): Promise<FileWriteRequest> {
+  const storage = parsed.options.storage;
+  if (parsed.content.mode !== "inline_base64") {
+    if (storage === "ipfs") {
+      throw badRequest("options.storage=ipfs requires inline_base64 content so EFS Scribe has bytes to pin");
+    }
+    return parsed;
+  }
+
+  const shouldPin =
+    storage === "ipfs" || (storage === "auto" && config.ipfs.apiUrl !== undefined);
+  if (!shouldPin) {
+    return parsed;
+  }
+  if (config.ipfs.apiUrl === undefined) {
+    throw new IpfsPinningError("IPFS pinning is not configured");
+  }
+  assertValidIpfsApiUrl(config.ipfs.apiUrl);
+
+  const inlineContent = parsed.content;
+  const bytes = Buffer.from(inlineContent.content_base64, "base64");
+  const preparedContent = {
+    mode: "external_mirror_only" as const,
+    payload_sha256: sha256Hex(bytes),
+    size_bytes: bytes.byteLength,
+    content_type: inlineContent.content_type
+  };
+  const provisional = FileWriteRequestSchema.parse({
+    ...parsed,
+    content: preparedContent,
+    mirrors: appendMirror(parsed.mirrors, { transport: "ipfs", uri: "ipfs://pending" })
+  });
+  await options.validatePreparedRequest?.(provisional);
+
+  options.ipfsRateLimiter.consume(options.authenticatedSubject);
+  const pinned = await options.ipfsAddSemaphore.run(() =>
+    addToIpfs(config.ipfs, {
+      bytes,
+      contentType: inlineContent.content_type,
+      filename: filenameFromPath(parsed.path),
+      onlyHash: options.onlyHashIpfs
+    })
+  );
+
+  return FileWriteRequestSchema.parse({
+    ...parsed,
+    content: preparedContent,
+    mirrors: appendMirror(parsed.mirrors, { transport: "ipfs", uri: pinned.uri })
+  });
+}
+
+function appendMirror(
+  mirrors: FileWriteRequest["mirrors"],
+  mirror: FileWriteRequest["mirrors"][number]
+): FileWriteRequest["mirrors"] {
+  if (mirrors.some((existing) => existing.transport === mirror.transport && existing.uri === mirror.uri)) {
+    return mirrors;
+  }
+  return [...mirrors, mirror];
+}
+
+function filenameFromPath(path: string): string {
+  const segment = path.split("/").filter(Boolean).at(-1);
+  return segment === undefined || segment.length === 0 ? "file" : segment;
+}
+
+function isAuthenticatedWriteRoute(method: string, url: string): boolean {
+  if (method !== "POST") {
+    return false;
+  }
+  const path = url.split("?")[0];
+  return path === "/v1/files" || path === "/v1/files/plan";
+}
+
+class TokenBucketRateLimiter {
+  private readonly buckets = new Map<string, { tokens: number; updatedAt: number }>();
+
+  constructor(
+    private readonly config: {
+      capacity: number;
+      refillTokens: number;
+      refillIntervalMs: number;
+    },
+    private readonly now: () => number = () => Date.now()
+  ) {}
+
+  consume(key: string): void {
+    const bucket = this.refilledBucket(key);
+    if (bucket.tokens < 1) {
+      throw rateLimited("IPFS upload rate limit exceeded");
+    }
+    bucket.tokens -= 1;
+    this.buckets.set(key, bucket);
+  }
+
+  private refilledBucket(key: string): { tokens: number; updatedAt: number } {
+    const currentTime = this.now();
+    const existing = this.buckets.get(key);
+    if (existing === undefined) {
+      return { tokens: this.config.capacity, updatedAt: currentTime };
+    }
+
+    const elapsed = Math.max(0, currentTime - existing.updatedAt);
+    const refillIntervals = Math.floor(elapsed / this.config.refillIntervalMs);
+    if (refillIntervals === 0) {
+      return existing;
+    }
+
+    return {
+      tokens: Math.min(
+        this.config.capacity,
+        existing.tokens + refillIntervals * this.config.refillTokens
+      ),
+      updatedAt: existing.updatedAt + refillIntervals * this.config.refillIntervalMs
+    };
+  }
+}
+
+class AsyncSemaphore {
+  private active = 0;
+  private readonly queue: Array<() => void> = [];
+
+  constructor(private readonly maxActive: number) {}
+
+  async run<T>(task: () => Promise<T>): Promise<T> {
+    await this.acquire();
+    try {
+      return await task();
+    } finally {
+      this.release();
+    }
+  }
+
+  private acquire(): Promise<void> {
+    if (this.active < this.maxActive) {
+      this.active += 1;
+      return Promise.resolve();
+    }
+    return new Promise((resolve) => {
+      this.queue.push(() => {
+        this.active += 1;
+        resolve();
+      });
+    });
+  }
+
+  private release(): void {
+    this.active -= 1;
+    const next = this.queue.shift();
+    if (next !== undefined) {
+      next();
+    }
+  }
 }
 
 function extractApiKey(request: FastifyRequest): string | undefined {
@@ -410,40 +658,44 @@ function planResponse(plan: unknown, config: AppConfig) {
   };
 }
 
-async function submitWithIdempotency(input: {
+async function writeWithOptionalIdempotency(input: {
   receipts: InMemoryReceiptRepository;
   pendingIdempotentSubmissions: Map<string, PendingIdempotentSubmission>;
+  parsed: FileWriteRequest;
+  config: AppConfig;
   writer: EfsWriter;
-  plan: EfsWritePlan;
   context: WriterContext;
-  idempotencyKey?: string;
+  writeRateLimiter: TokenBucketRateLimiter;
+  ipfsRateLimiter: TokenBucketRateLimiter;
+  ipfsAddSemaphore: AsyncSemaphore;
 }): Promise<SubmissionResult> {
-  const { idempotencyKey } = input;
+  const idempotencyKey = input.parsed.options.idempotency_key;
+  const originalRequestHash = originalWriteRequestHash(input.parsed, input.context);
   if (idempotencyKey === undefined) {
-    return submitAndStore(input);
+    return prepareAndSubmit(input);
   }
 
   const key = idempotencyKeyFor(input.context.auth.authenticated_subject, idempotencyKey);
-  const existing = await input.receipts.getByIdempotency(
+  const existing = await input.receipts.getIdempotencyEntry(
     input.context.auth.authenticated_subject,
     idempotencyKey
   );
   if (existing !== undefined) {
-    assertSameIdempotentRequest(existing, input.plan);
-    return { receipt: existing };
+    assertSameOriginalIdempotentRequest(existing.requestHash, originalRequestHash);
+    return { receipt: existing.receipt };
   }
 
   const pending = input.pendingIdempotentSubmissions.get(key);
   if (pending !== undefined) {
-    if (pending.canonicalRequestHash !== input.plan.canonicalRequestHash) {
+    if (pending.originalRequestHash !== originalRequestHash) {
       throw conflict("Idempotency key is already in use for a different file write request");
     }
     return pending.result;
   }
 
-  const result = submitAndStore(input);
+  const result = prepareAndSubmit(input);
   input.pendingIdempotentSubmissions.set(key, {
-    canonicalRequestHash: input.plan.canonicalRequestHash,
+    originalRequestHash,
     result
   });
   try {
@@ -453,25 +705,59 @@ async function submitWithIdempotency(input: {
   }
 }
 
+async function prepareAndSubmit(input: {
+  receipts: InMemoryReceiptRepository;
+  parsed: FileWriteRequest;
+  config: AppConfig;
+  writer: EfsWriter;
+  context: WriterContext;
+  ipfsRateLimiter: TokenBucketRateLimiter;
+  ipfsAddSemaphore: AsyncSemaphore;
+  writeRateLimiter: TokenBucketRateLimiter;
+}): Promise<SubmissionResult> {
+  const prepared = await prepareFileWriteRequest(input.parsed, input.config, {
+    onlyHashIpfs: false,
+    authenticatedSubject: input.context.auth.authenticated_subject,
+    ipfsRateLimiter: input.ipfsRateLimiter,
+    ipfsAddSemaphore: input.ipfsAddSemaphore,
+    validatePreparedRequest: async (candidate) => {
+      await input.writer.planFile(candidate, input.context);
+    }
+  });
+  input.writeRateLimiter.consume(input.context.auth.authenticated_subject);
+  const plan = await input.writer.planFile(prepared, input.context);
+  return submitAndStore({
+    receipts: input.receipts,
+    writer: input.writer,
+    plan,
+    context: input.context,
+    idempotencyKey: input.parsed.options.idempotency_key,
+    idempotencyRequestHash: originalWriteRequestHash(input.parsed, input.context)
+  });
+}
+
 async function submitAndStore(input: {
   receipts: InMemoryReceiptRepository;
   writer: EfsWriter;
   plan: EfsWritePlan;
   context: WriterContext;
   idempotencyKey?: string;
+  idempotencyRequestHash?: string;
 }): Promise<SubmissionResult> {
   try {
     const receipt = await input.writer.submitPlan(input.plan, input.context);
     await input.receipts.save(receipt, {
       authenticatedSubject: input.context.auth.authenticated_subject,
-      idempotencyKey: input.idempotencyKey
+      idempotencyKey: input.idempotencyKey,
+      idempotencyRequestHash: input.idempotencyRequestHash
     });
     return { receipt };
   } catch (error) {
     if (error instanceof SepoliaSubmitError && error.partialReceipt !== undefined) {
       await input.receipts.save(error.partialReceipt, {
         authenticatedSubject: input.context.auth.authenticated_subject,
-        idempotencyKey: input.idempotencyKey
+        idempotencyKey: input.idempotencyKey,
+        idempotencyRequestHash: input.idempotencyRequestHash
       });
       return { receipt: error.partialReceipt, error };
     }
@@ -503,8 +789,18 @@ function sepoliaErrorBody(error: SepoliaPreflightError | SepoliaSubmitError) {
   };
 }
 
-function assertSameIdempotentRequest(receipt: EfsScribeReceipt, plan: EfsWritePlan): void {
-  if (receipt.integrity.canonical_request_sha256 !== plan.canonicalRequestHash) {
+function originalWriteRequestHash(parsed: FileWriteRequest, context: WriterContext): string {
+  return sha256Hex({
+    authenticatedSubject: context.auth.authenticated_subject,
+    request: parsed
+  });
+}
+
+function assertSameOriginalIdempotentRequest(
+  storedRequestHash: string | undefined,
+  originalRequestHash: string
+): void {
+  if (storedRequestHash !== undefined && storedRequestHash !== originalRequestHash) {
     throw conflict("Idempotency key was already used for a different file write request");
   }
 }

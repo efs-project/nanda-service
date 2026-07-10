@@ -38,6 +38,9 @@ describe("parseEnv", () => {
       EFS_CHAIN_ID: "11155111",
       EFS_EAS_ADDRESS: EFS_SEPOLIA.eas,
       SEPOLIA_RPC_URL: "https://sepolia.example.test/rpc",
+      IPFS_API_URL: "http://127.0.0.1:5001/api/v0",
+      IPFS_GATEWAY_URL: "https://ipfs.io/ipfs/",
+      IPFS_API_AUTHORIZATION: "Bearer local-ipfs-token",
       SERVICE_SPONSOR_PRIVATE_KEY: `0x${"1".repeat(64)}`,
       RECEIPT_SIGNER_PRIVATE_KEY: `0x${"2".repeat(64)}`
     });
@@ -48,6 +51,11 @@ describe("parseEnv", () => {
       rpcUrl: "https://sepolia.example.test/rpc",
       easAddress: EFS_SEPOLIA.eas,
       agentFundingTargetWei: 20_000_000_000_000_000n
+    });
+    expect(config.ipfs).toEqual({
+      apiUrl: "http://127.0.0.1:5001/api/v0",
+      gatewayUrl: "https://ipfs.io/ipfs/",
+      authorization: "Bearer local-ipfs-token"
     });
   });
 

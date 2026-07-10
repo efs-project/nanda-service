@@ -4,8 +4,11 @@ import Fastify from "fastify";
 import { parseEnv, type AppConfig } from "./config/env.js";
 import { OfflineEfsWriter } from "./efs/offline-writer.js";
 import { createSepoliaEfsWriter } from "./efs/sepolia-writer.js";
-import type { EfsWriter } from "./efs/writer.js";
+import { MAX_INLINE_CONTENT_BYTES, type EfsWriter } from "./efs/writer.js";
 import { registerRoutes } from "./http/routes.js";
+
+const JSON_BODY_MARGIN_BYTES = 64 * 1024;
+const MAX_JSON_BODY_BYTES = Math.ceil(MAX_INLINE_CONTENT_BYTES / 3) * 4 + JSON_BODY_MARGIN_BYTES;
 
 export async function buildApp(overrides: Partial<AppConfig> = {}) {
   const config: AppConfig = {
@@ -14,6 +17,7 @@ export async function buildApp(overrides: Partial<AppConfig> = {}) {
   };
   const writer = createWriter(config);
   const app = Fastify({
+    bodyLimit: MAX_JSON_BODY_BYTES,
     logger: config.logLevel === "silent" ? false : { level: config.logLevel }
   });
 

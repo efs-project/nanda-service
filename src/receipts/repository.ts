@@ -3,6 +3,12 @@ import type { EfsScribeReceipt } from "./schema.js";
 export interface ReceiptIndex {
   authenticatedSubject: string;
   idempotencyKey?: string;
+  idempotencyRequestHash?: string;
+}
+
+export interface IdempotencyEntry {
+  receipt: EfsScribeReceipt;
+  requestHash?: string;
 }
 
 export interface ReceiptRepository {
@@ -13,11 +19,15 @@ export interface ReceiptRepository {
     authenticatedSubject: string,
     idempotencyKey: string
   ): Promise<EfsScribeReceipt | undefined>;
+  getIdempotencyEntry(
+    authenticatedSubject: string,
+    idempotencyKey: string
+  ): Promise<IdempotencyEntry | undefined>;
 }
 
 export class InMemoryReceiptRepository implements ReceiptRepository {
   private readonly receipts = new Map<string, EfsScribeReceipt>();
-  private readonly idempotency = new Map<string, string>();
+  private readonly idempotency = new Map<string, { receiptId: string; requestHash?: string }>();
   private readonly latestByPath = new Map<string, string>();
   private readonly latestByPathAndAttester = new Map<string, string>();
 
@@ -31,7 +41,10 @@ export class InMemoryReceiptRepository implements ReceiptRepository {
     if (index.idempotencyKey !== undefined) {
       this.idempotency.set(
         idempotencyKey(index.authenticatedSubject, index.idempotencyKey),
-        receipt.receipt_id
+        {
+          receiptId: receipt.receipt_id,
+          requestHash: index.idempotencyRequestHash
+        }
       );
     }
   }
@@ -55,11 +68,22 @@ export class InMemoryReceiptRepository implements ReceiptRepository {
     authenticatedSubject: string,
     idempotencyKeyValue: string
   ): Promise<EfsScribeReceipt | undefined> {
-    const receiptId = this.idempotency.get(idempotencyKey(authenticatedSubject, idempotencyKeyValue));
-    if (receiptId === undefined) {
+    return (await this.getIdempotencyEntry(authenticatedSubject, idempotencyKeyValue))?.receipt;
+  }
+
+  async getIdempotencyEntry(
+    authenticatedSubject: string,
+    idempotencyKeyValue: string
+  ): Promise<IdempotencyEntry | undefined> {
+    const entry = this.idempotency.get(idempotencyKey(authenticatedSubject, idempotencyKeyValue));
+    if (entry === undefined) {
       return undefined;
     }
-    return this.receipts.get(receiptId);
+    const receipt = this.receipts.get(entry.receiptId);
+    if (receipt === undefined) {
+      return undefined;
+    }
+    return { receipt, requestHash: entry.requestHash };
   }
 }
 

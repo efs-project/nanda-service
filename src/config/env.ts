@@ -14,6 +14,9 @@ const EnvSchema = z.object({
   PUBLIC_BASE_URL: z.string().url().default("http://localhost:3000"),
   PORT: z.coerce.number().int().positive().default(3000),
   LOG_LEVEL: z.string().default("info"),
+  IPFS_API_URL: z.string().default(""),
+  IPFS_GATEWAY_URL: z.string().default(""),
+  IPFS_API_AUTHORIZATION: z.string().default(""),
   EFS_CHAIN_ID: z.coerce.number().int().positive().default(SEPOLIA_CHAIN_ID),
   EFS_EAS_ADDRESS: z
     .string()
@@ -43,7 +46,14 @@ export interface AppConfig {
   port: number;
   logLevel: string;
   chainId: number;
+  ipfs: IpfsConfig;
   sepolia: SepoliaConfig;
+}
+
+export interface IpfsConfig {
+  apiUrl?: string;
+  gatewayUrl?: string;
+  authorization?: string;
 }
 
 export function parseEnv(env: NodeJS.ProcessEnv = process.env): AppConfig {
@@ -57,6 +67,11 @@ export function parseEnv(env: NodeJS.ProcessEnv = process.env): AppConfig {
     port: parsed.PORT,
     logLevel: parsed.LOG_LEVEL,
     chainId: parsed.EFS_CHAIN_ID,
+    ipfs: {
+      apiUrl: usableUrl(parsed.IPFS_API_URL),
+      gatewayUrl: usableUrl(parsed.IPFS_GATEWAY_URL),
+      authorization: usableSecret(parsed.IPFS_API_AUTHORIZATION)
+    },
     sepolia
   };
 }
@@ -93,6 +108,14 @@ function buildSepoliaConfig(parsed: z.infer<typeof EnvSchema>): SepoliaConfig {
 }
 
 function usableUrl(value: string): string | undefined {
+  const trimmed = value.trim();
+  if (trimmed.length === 0 || /^replace/i.test(trimmed)) {
+    return undefined;
+  }
+  return trimmed;
+}
+
+function usableSecret(value: string): string | undefined {
   const trimmed = value.trim();
   if (trimmed.length === 0 || /^replace/i.test(trimmed)) {
     return undefined;

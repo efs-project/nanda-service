@@ -10,14 +10,15 @@ export type Hex = `0x${string}`;
 export type Uid = Hex;
 export type RefOrUid = Uid | { ref: string } | { external: string };
 
-export const MAX_INLINE_CONTENT_BYTES = 4_096;
+export const MAX_INLINE_CONTENT_BYTES = 10 * 1024 * 1024;
 const MAX_BASE64_CHARS = Math.ceil(MAX_INLINE_CONTENT_BYTES / 3) * 4;
 const MAX_PATH_CHARS = 512;
-const MAX_MIRRORS = 8;
+export const MAX_MIRRORS = 8;
 const MAX_PROPERTIES = 32;
 const MAX_PROPERTY_KEY_CHARS = 96;
 const MAX_PROPERTY_VALUE_CHARS = 1024;
 const MAX_IDEMPOTENCY_KEY_CHARS = 128;
+const StorageStrategySchema = z.enum(["auto", "ipfs", "metadata_only"]);
 
 const MirrorSchema = z.object({
   transport: z.enum(EFS_TRANSPORTS),
@@ -29,7 +30,9 @@ const InlineContentSchema = z.object({
   content_base64: z
     .string()
     .min(1)
-    .max(MAX_BASE64_CHARS)
+    .max(MAX_BASE64_CHARS, {
+      message: `inline_base64 content must decode to ${MAX_INLINE_CONTENT_BYTES} bytes or less`
+    })
     .refine(isStrictBase64, {
       message: "content_base64 must be valid standard base64"
     })
@@ -49,6 +52,7 @@ const HashOnlyContentSchema = z.object({
 const ExternalMirrorOnlyContentSchema = z.object({
   mode: z.literal("external_mirror_only"),
   payload_sha256: z.string().regex(/^sha256:[0-9a-f]{64}$/),
+  size_bytes: z.number().int().nonnegative().optional(),
   content_type: z.string().min(1).max(128).optional()
 });
 
@@ -70,7 +74,8 @@ export const FileWriteRequestSchema = z.object({
   options: z
     .object({
       dry_run: z.boolean().default(false),
-      idempotency_key: z.string().min(1).max(MAX_IDEMPOTENCY_KEY_CHARS).optional()
+      idempotency_key: z.string().min(1).max(MAX_IDEMPOTENCY_KEY_CHARS).optional(),
+      storage: StorageStrategySchema.default("auto")
     })
     .default({})
 }).superRefine((request, ctx) => {
@@ -95,6 +100,7 @@ export const FileWriteRequestSchema = z.object({
 
 export type FileWriteRequest = z.infer<typeof FileWriteRequestSchema>;
 export type FileWriteRequestInput = z.input<typeof FileWriteRequestSchema>;
+export type StorageStrategy = z.infer<typeof StorageStrategySchema>;
 
 export interface WriterContext {
   auth: AuthContext;
@@ -148,5 +154,39 @@ export interface EfsWriter {
 }
 
 function isStrictBase64(value: string): boolean {
-  return /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(value);
+  if (value.length % 4 !== 0) {
+    return false;
+  }
+
+  const firstPadding = value.indexOf("=");
+  const contentEnd = firstPadding === -1 ? value.length : firstPadding;
+  if (firstPadding !== -1) {
+    const paddingLength = value.length - firstPadding;
+    if (paddingLength > 2) {
+      return false;
+    }
+    for (let index = firstPadding; index < value.length; index += 1) {
+      if (value[index] !== "=") {
+        return false;
+      }
+    }
+  }
+
+  for (let index = 0; index < contentEnd; index += 1) {
+    if (!isBase64Char(value.charCodeAt(index))) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+function isBase64Char(code: number): boolean {
+  return (
+    (code >= 0x41 && code <= 0x5a) ||
+    (code >= 0x61 && code <= 0x7a) ||
+    (code >= 0x30 && code <= 0x39) ||
+    code === 0x2b ||
+    code === 0x2f
+  );
 }

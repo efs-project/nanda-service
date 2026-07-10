@@ -25,3 +25,7 @@ export function conflict(message: string): HttpError {
 export function notFound(message: string): HttpError {
   return new HttpError(404, "not_found", message);
 }
+
+export function rateLimited(message: string): HttpError {
+  return new HttpError(429, "rate_limited", message);
+}

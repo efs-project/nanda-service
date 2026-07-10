@@ -1,3 +1,6 @@
+import { createServer, type Server } from "node:http";
+import type { AddressInfo } from "node:net";
+
 import Fastify from "fastify";
 import { describe, expect, it } from "vitest";
 
@@ -220,6 +223,28 @@ describe("HTTP API", () => {
     await app.close();
   });
 
+  it("rejects unauthenticated write requests before body validation", async () => {
+    const app = await buildApp({
+      mode: "offline",
+      apiKeysJson: '{"local-scribe-key":"api-key:local-scribe-agent"}',
+      derivationSecret: "unit-test-secret",
+      publicBaseUrl: "http://localhost:3000",
+      logLevel: "silent"
+    });
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/files",
+      headers: { "content-type": "application/json" },
+      payload: "{"
+    });
+
+    expect(response.statusCode).toBe(401);
+    expect(response.json()).toMatchObject({ error: "unauthorized" });
+
+    await app.close();
+  });
+
   it("writes and verifies an offline receipt", async () => {
     const app = await buildApp({
       mode: "offline",
@@ -290,6 +315,426 @@ describe("HTTP API", () => {
     });
 
     expect(unresolved.statusCode).toBe(404);
+
+    await app.close();
+  });
+
+  it("adds an IPFS mirror for inline content when IPFS pinning is configured", async () => {
+    const ipfs = await startFakeIpfs();
+    const app = await buildApp({
+      mode: "offline",
+      apiKeysJson: '{"local-scribe-key":"api-key:local-scribe-agent"}',
+      derivationSecret: "unit-test-secret",
+      publicBaseUrl: "http://localhost:3000",
+      logLevel: "silent",
+      ipfs: { apiUrl: ipfs.url, authorization: "Bearer fake-ipfs-token" }
+    });
+
+    const plan = await app.inject({
+      method: "POST",
+      url: "/v1/files/plan",
+      headers: { authorization: "Bearer local-scribe-key" },
+      payload: writeBody
+    });
+
+    expect(plan.statusCode).toBe(200);
+    expect(ipfs.requests).toHaveLength(1);
+    expect(ipfs.requests[0]?.url).toContain("only-hash=true");
+    expect(ipfs.requests[0]?.url).toContain("pin=false");
+    expect(plan.json().plan.layers).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          ref: "mirror.0",
+          fields: expect.objectContaining({
+            transport: "ipfs",
+            uri: "ipfs://bafybeihackathon"
+          })
+        })
+      ])
+    );
+
+    await app.close();
+    await ipfs.close();
+  });
+
+  it("pins inline content to IPFS before writing by default", async () => {
+    const ipfs = await startFakeIpfs();
+    const app = await buildApp({
+      mode: "offline",
+      apiKeysJson: '{"local-scribe-key":"api-key:local-scribe-agent"}',
+      derivationSecret: "unit-test-secret",
+      publicBaseUrl: "http://localhost:3000",
+      logLevel: "silent",
+      ipfs: { apiUrl: ipfs.url, authorization: "Bearer fake-ipfs-token" }
+    });
+
+    const write = await app.inject({
+      method: "POST",
+      url: "/v1/files",
+      headers: { authorization: "Bearer local-scribe-key" },
+      payload: writeBody
+    });
+
+    expect(write.statusCode).toBe(200);
+    expect(ipfs.requests).toHaveLength(1);
+    expect(ipfs.requests[0]?.url).not.toContain("only-hash=true");
+    expect(ipfs.requests[0]?.url).toContain("pin=true");
+    expect(ipfs.requests[0]?.authorization).toBe("Bearer fake-ipfs-token");
+    expect(write.json().receipt.efs.uids.mirrors).toHaveLength(1);
+    expect(write.json().receipt.efs.mirrors).toEqual([
+      { transport: "ipfs", uri: "ipfs://bafybeihackathon" }
+    ]);
+
+    await app.close();
+    await ipfs.close();
+  });
+
+  it("returns idempotent retries without re-pinning to IPFS", async () => {
+    const ipfs = await startFakeIpfs();
+    const app = await buildApp({
+      mode: "offline",
+      apiKeysJson: '{"local-scribe-key":"api-key:local-scribe-agent"}',
+      derivationSecret: "unit-test-secret",
+      publicBaseUrl: "http://localhost:3000",
+      logLevel: "silent",
+      ipfs: { apiUrl: ipfs.url }
+    });
+
+    const first = await app.inject({
+      method: "POST",
+      url: "/v1/files",
+      headers: { authorization: "Bearer local-scribe-key" },
+      payload: writeBody
+    });
+    const retry = await app.inject({
+      method: "POST",
+      url: "/v1/files",
+      headers: { authorization: "Bearer local-scribe-key" },
+      payload: writeBody
+    });
+
+    expect(first.statusCode).toBe(200);
+    expect(retry.statusCode).toBe(200);
+    expect(retry.json().receipt).toEqual(first.json().receipt);
+    expect(ipfs.requests).toHaveLength(1);
+
+    await app.close();
+    await ipfs.close();
+  });
+
+  it("rejects requests that would exceed mirror limits before pinning", async () => {
+    const ipfs = await startFakeIpfs();
+    const app = await buildApp({
+      mode: "offline",
+      apiKeysJson: '{"local-scribe-key":"api-key:local-scribe-agent"}',
+      derivationSecret: "unit-test-secret",
+      publicBaseUrl: "http://localhost:3000",
+      logLevel: "silent",
+      ipfs: { apiUrl: ipfs.url }
+    });
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/files/plan",
+      headers: { authorization: "Bearer local-scribe-key" },
+      payload: {
+        ...writeBody,
+        mirrors: Array.from({ length: 8 }, (_, index) => ({
+          transport: "https",
+          uri: `https://example.com/${index}.json`
+        })),
+        options: { ...writeBody.options, storage: "ipfs" }
+      }
+    });
+
+    expect(response.statusCode).toBe(400);
+    expect(ipfs.requests).toHaveLength(0);
+
+    await app.close();
+    await ipfs.close();
+  });
+
+  it("rejects reserved property conflicts before pinning", async () => {
+    const ipfs = await startFakeIpfs();
+    const app = await buildApp({
+      mode: "offline",
+      apiKeysJson: '{"local-scribe-key":"api-key:local-scribe-agent"}',
+      derivationSecret: "unit-test-secret",
+      publicBaseUrl: "http://localhost:3000",
+      logLevel: "silent",
+      ipfs: { apiUrl: ipfs.url }
+    });
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/files/plan",
+      headers: { authorization: "Bearer local-scribe-key" },
+      payload: {
+        ...writeBody,
+        properties: {
+          ...writeBody.properties,
+          contentHash:
+            "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+        },
+        options: { ...writeBody.options, storage: "ipfs" }
+      }
+    });
+
+    expect(response.statusCode).toBe(400);
+    expect(ipfs.requests).toHaveLength(0);
+
+    await app.close();
+    await ipfs.close();
+  });
+
+  it("reports invalid IPFS configuration as an IPFS service error", async () => {
+    const app = await buildApp({
+      mode: "offline",
+      apiKeysJson: '{"local-scribe-key":"api-key:local-scribe-agent"}',
+      derivationSecret: "unit-test-secret",
+      publicBaseUrl: "http://localhost:3000",
+      logLevel: "silent",
+      ipfs: { apiUrl: "not a url" }
+    });
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/files/plan",
+      headers: { authorization: "Bearer local-scribe-key" },
+      payload: {
+        ...writeBody,
+        options: { ...writeBody.options, storage: "ipfs" }
+      }
+    });
+
+    expect(response.statusCode).toBe(503);
+    expect(response.json()).toMatchObject({
+      error: "ipfs_pin_error",
+      message: "IPFS API URL is invalid"
+    });
+
+    await app.close();
+  });
+
+  it("does not consume rate-limit tokens for invalid IPFS configuration", async () => {
+    const app = await buildApp({
+      mode: "offline",
+      apiKeysJson: '{"local-scribe-key":"api-key:local-scribe-agent"}',
+      derivationSecret: "unit-test-secret",
+      publicBaseUrl: "http://localhost:3000",
+      logLevel: "silent",
+      ipfs: { apiUrl: "not a url" }
+    });
+
+    const responses = [];
+    for (let index = 0; index < 11; index += 1) {
+      responses.push(
+        await app.inject({
+          method: "POST",
+          url: "/v1/files",
+          headers: { authorization: "Bearer local-scribe-key" },
+          payload: {
+            ...writeBody,
+            path: `/agents/demo/invalid-ipfs-${index}.json`,
+            options: {
+              ...writeBody.options,
+              idempotency_key: `invalid-ipfs-${index}`,
+              storage: "ipfs"
+            }
+          }
+        })
+      );
+    }
+
+    expect(responses.every((response) => response.statusCode === 503)).toBe(true);
+    expect(responses.every((response) => response.json().error === "ipfs_pin_error")).toBe(true);
+
+    await app.close();
+  });
+
+  it("does not expose upstream IPFS error bodies", async () => {
+    const ipfs = await startFakeIpfs({
+      finalStatus: 400,
+      finalBody: '{"secret":"internal proxy detail"}'
+    });
+    const app = await buildApp({
+      mode: "offline",
+      apiKeysJson: '{"local-scribe-key":"api-key:local-scribe-agent"}',
+      derivationSecret: "unit-test-secret",
+      publicBaseUrl: "http://localhost:3000",
+      logLevel: "silent",
+      ipfs: { apiUrl: ipfs.url }
+    });
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/files/plan",
+      headers: { authorization: "Bearer local-scribe-key" },
+      payload: {
+        ...writeBody,
+        options: { ...writeBody.options, storage: "ipfs" }
+      }
+    });
+
+    expect(response.statusCode).toBe(503);
+    expect(response.body).toContain("IPFS add failed with HTTP 400");
+    expect(response.body).not.toContain("internal proxy detail");
+
+    await app.close();
+    await ipfs.close();
+  });
+
+  it("retries transient IPFS add failures", async () => {
+    const ipfs = await startFakeIpfs({ failuresBeforeSuccess: 2 });
+    const app = await buildApp({
+      mode: "offline",
+      apiKeysJson: '{"local-scribe-key":"api-key:local-scribe-agent"}',
+      derivationSecret: "unit-test-secret",
+      publicBaseUrl: "http://localhost:3000",
+      logLevel: "silent",
+      ipfs: { apiUrl: ipfs.url }
+    });
+
+    const write = await app.inject({
+      method: "POST",
+      url: "/v1/files",
+      headers: { authorization: "Bearer local-scribe-key" },
+      payload: writeBody
+    });
+
+    expect(write.statusCode).toBe(200);
+    expect(ipfs.requests).toHaveLength(3);
+
+    await app.close();
+    await ipfs.close();
+  });
+
+  it("rate limits IPFS operations per authenticated actor", async () => {
+    const ipfs = await startFakeIpfs();
+    const app = await buildApp({
+      mode: "offline",
+      apiKeysJson: '{"local-scribe-key":"api-key:local-scribe-agent"}',
+      derivationSecret: "unit-test-secret",
+      publicBaseUrl: "http://localhost:3000",
+      logLevel: "silent",
+      ipfs: { apiUrl: ipfs.url }
+    });
+
+    const responses = [];
+    for (let index = 0; index < 11; index += 1) {
+      responses.push(
+        await app.inject({
+          method: "POST",
+          url: "/v1/files/plan",
+          headers: { authorization: "Bearer local-scribe-key" },
+          payload: {
+            ...writeBody,
+            path: `/agents/demo/rate-${index}.json`,
+            options: {
+              ...writeBody.options,
+              idempotency_key: `rate-limit-${index}`,
+              storage: "ipfs"
+            }
+          }
+        })
+      );
+    }
+
+    expect(responses.slice(0, 10).every((response) => response.statusCode === 200)).toBe(true);
+    expect(responses[10]?.statusCode).toBe(429);
+    expect(responses[10]?.json()).toMatchObject({ error: "rate_limited" });
+    expect(ipfs.requests).toHaveLength(10);
+
+    await app.close();
+    await ipfs.close();
+  });
+
+  it("rate limits file writes per authenticated actor", async () => {
+    const app = await buildApp({
+      mode: "offline",
+      apiKeysJson: '{"local-scribe-key":"api-key:local-scribe-agent"}',
+      derivationSecret: "unit-test-secret",
+      publicBaseUrl: "http://localhost:3000",
+      logLevel: "silent"
+    });
+
+    const responses = [];
+    for (let index = 0; index < 11; index += 1) {
+      responses.push(
+        await app.inject({
+          method: "POST",
+          url: "/v1/files",
+          headers: { authorization: "Bearer local-scribe-key" },
+          payload: {
+            ...writeBody,
+            path: `/agents/demo/write-rate-${index}.json`,
+            options: {
+              ...writeBody.options,
+              idempotency_key: `write-rate-limit-${index}`
+            }
+          }
+        })
+      );
+    }
+
+    expect(responses.slice(0, 10).every((response) => response.statusCode === 200)).toBe(true);
+    expect(responses[10]?.statusCode).toBe(429);
+    expect(responses[10]?.json()).toMatchObject({ error: "rate_limited" });
+
+    await app.close();
+  });
+
+  it("lets callers skip service-side IPFS pinning for inline content", async () => {
+    const ipfs = await startFakeIpfs();
+    const app = await buildApp({
+      mode: "offline",
+      apiKeysJson: '{"local-scribe-key":"api-key:local-scribe-agent"}',
+      derivationSecret: "unit-test-secret",
+      publicBaseUrl: "http://localhost:3000",
+      logLevel: "silent",
+      ipfs: { apiUrl: ipfs.url }
+    });
+
+    const write = await app.inject({
+      method: "POST",
+      url: "/v1/files",
+      headers: { authorization: "Bearer local-scribe-key" },
+      payload: {
+        ...writeBody,
+        options: { ...writeBody.options, storage: "metadata_only" }
+      }
+    });
+
+    expect(write.statusCode).toBe(200);
+    expect(ipfs.requests).toHaveLength(0);
+    expect(write.json().receipt.efs.uids.mirrors).toHaveLength(0);
+    expect(write.json().receipt.efs.mirrors).toEqual([]);
+
+    await app.close();
+    await ipfs.close();
+  });
+
+  it("returns a service error when explicit IPFS pinning is unavailable", async () => {
+    const app = await buildApp({
+      mode: "offline",
+      apiKeysJson: '{"local-scribe-key":"api-key:local-scribe-agent"}',
+      derivationSecret: "unit-test-secret",
+      publicBaseUrl: "http://localhost:3000",
+      logLevel: "silent"
+    });
+
+    const write = await app.inject({
+      method: "POST",
+      url: "/v1/files",
+      headers: { authorization: "Bearer local-scribe-key" },
+      payload: {
+        ...writeBody,
+        options: { ...writeBody.options, storage: "ipfs" }
+      }
+    });
+
+    expect(write.statusCode).toBe(503);
+    expect(write.json()).toMatchObject({ error: "ipfs_pin_error" });
 
     await app.close();
   });
@@ -456,6 +901,7 @@ describe("HTTP API", () => {
       attester: receipt.agent_lens.attester,
       receipt_id: receipt.receipt_id,
       payload_sha256: receipt.integrity.payload_sha256,
+      mirrors: receipt.efs.mirrors,
       uids: receipt.efs.uids
     });
 
@@ -565,6 +1011,7 @@ const testConfig: AppConfig = {
   port: 3000,
   logLevel: "silent",
   chainId: 11155111,
+  ipfs: {},
   sepolia: {
     ready: false,
     missing: [],
@@ -598,4 +1045,55 @@ class ThrowingSepoliaWriter extends OfflineEfsWriter {
   override async submitPlan(): Promise<EfsScribeReceipt> {
     throw new SepoliaSubmitError("Sepolia RPC unavailable");
   }
+}
+
+interface FakeIpfsServer {
+  url: string;
+  requests: Array<{ url: string; bodyBytes: number; authorization?: string }>;
+  close: () => Promise<void>;
+}
+
+async function startFakeIpfs(
+  options: { failuresBeforeSuccess?: number; finalStatus?: number; finalBody?: string } = {}
+): Promise<FakeIpfsServer> {
+  const requests: FakeIpfsServer["requests"] = [];
+  const server: Server = createServer((request, response) => {
+    let bodyBytes = 0;
+    request.on("data", (chunk: Buffer) => {
+      bodyBytes += chunk.byteLength;
+    });
+    request.on("end", () => {
+      requests.push({
+        url: request.url ?? "",
+        bodyBytes,
+        authorization: request.headers.authorization
+      });
+      if (requests.length <= (options.failuresBeforeSuccess ?? 0)) {
+        response.writeHead(503, { "content-type": "application/json" });
+        response.end('{"Message":"temporary unavailable"}\n');
+        return;
+      }
+      if (options.finalStatus !== undefined && options.finalStatus !== 200) {
+        response.writeHead(options.finalStatus, { "content-type": "application/json" });
+        response.end(options.finalBody ?? '{"Message":"failed"}\n');
+        return;
+      }
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end('{"Name":"status.json","Hash":"bafybeihackathon","Size":"11"}\n');
+    });
+  });
+
+  await new Promise<void>((resolve) => {
+    server.listen(0, "127.0.0.1", resolve);
+  });
+  const address = server.address() as AddressInfo;
+
+  return {
+    url: `http://127.0.0.1:${address.port}/api/v0`,
+    requests,
+    close: () =>
+      new Promise<void>((resolve, reject) => {
+        server.close((error) => (error === undefined ? resolve() : reject(error)));
+      })
+  };
 }

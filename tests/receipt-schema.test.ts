@@ -54,5 +54,6 @@ describe("ReceiptSchema", () => {
     });
 
     expect(parsed.receipt_id).toBe("rcpt_abc123");
+    expect(parsed.efs.mirrors).toEqual([]);
   });
 });

@@ -4,6 +4,7 @@ import { deriveAttester } from "../src/auth/derived-attester.js";
 import type { AuthContext } from "../src/auth/subject.js";
 import { EFS_SCHEMA_UIDS } from "../src/config/chains.js";
 import { buildFileWritePlan, normalizeEfsPath } from "../src/efs/write-plan.js";
+import { MAX_INLINE_CONTENT_BYTES } from "../src/efs/writer.js";
 
 const auth: AuthContext = {
   method: "api_key",
@@ -210,13 +211,13 @@ describe("buildFileWritePlan", () => {
           path: "/agents/demo/status.json",
           content: {
             mode: "inline_base64",
-            content_base64: Buffer.alloc(4_097).toString("base64"),
+            content_base64: Buffer.alloc(MAX_INLINE_CONTENT_BYTES + 1).toString("base64"),
             content_type: "application/octet-stream"
           }
         },
         context
       )
-    ).toThrow(/4096/);
+    ).toThrow(String(MAX_INLINE_CONTENT_BYTES));
 
     expect(() =>
       buildFileWritePlan(

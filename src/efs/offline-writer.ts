@@ -10,7 +10,7 @@ import type {
   VerificationResult,
   WriterContext
 } from "./writer.js";
-import { buildFileWritePlan } from "./write-plan.js";
+import { buildFileWritePlan, collectPlannedMirrors } from "./write-plan.js";
 
 interface OfflineWriterOptions {
   now?: () => Date;
@@ -85,6 +85,7 @@ export class OfflineEfsWriter implements EfsWriter {
         tx_hashes: [],
         block_numbers: [],
         path: plan.path,
+        mirrors: collectPlannedMirrors(plan),
         uids: {
           data: dataUid,
           file_anchor: fileAnchorUid,

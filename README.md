@@ -1,12 +1,13 @@
 # EFS Scribe
 
-Agent-friendly EFS write receipts for local development and Sepolia demo work.
+Agent-friendly EFS write receipts for local development and Sepolia testnet work.
 
 EFS Scribe gives agents a simple HTTP API for publishing EFS file records,
-previewing the EFS attestation plan, receiving receipts, resolving stored
-receipts by path, and verifying receipts later. It ships two modes:
-deterministic `offline` receipts for local development, and configured
-`sepolia` writes that submit real EAS `multiAttest` transactions.
+pinning supplied bytes to IPFS when configured, previewing the EFS attestation
+plan, receiving receipts, resolving stored receipts by path, and verifying
+receipts later. It ships two modes: deterministic `offline` receipts for local
+development, and configured `sepolia` writes that submit real EAS `multiAttest`
+transactions.
 
 ## Quick Start
 
@@ -16,6 +17,13 @@ npm run dev
 ```
 
 The local default API key is `local-scribe-key`.
+
+Set `IPFS_API_URL` to a Kubo-compatible API such as
+`http://127.0.0.1:5001/api/v0` when you want inline bytes pinned to IPFS by
+default. EFS Scribe treats IPFS pinning as best-effort infrastructure: it
+retries transient failures, limits service-side IPFS operations per
+authenticated actor, rate-limits file writes, and keeps concurrent IPFS adds
+low.
 
 ```bash
 curl http://localhost:3000/health
@@ -44,9 +52,10 @@ curl -X POST http://localhost:3000/v1/files/plan \
 The plan includes a `preflight` list naming Sepolia facts the chain writer
 resolves first, such as `rootAnchorUID`, existing path anchors, and
 `/transports/<name>` anchors. DATA itself is the EFS empty identity attestation,
-with `contentHash`, `contentType`, and `size` bound as PROPERTYs. Retrievable
-bytes should be supplied through explicit mirrors such as `https` or `ipfs`;
-`inline_base64` is used to compute the content facts.
+with `contentHash`, `contentType`, and `size` bound as PROPERTYs. When
+`IPFS_API_URL` is configured, `inline_base64` input is pinned to IPFS and the
+EFS record gets an `ipfs://...` MIRROR. Without IPFS pinning, inline bytes are
+used only to compute content facts and are not retrievable from the EFS record.
 
 Write a small JSON file in offline mode:
 
@@ -69,6 +78,9 @@ curl -X POST http://localhost:3000/v1/files \
 
 Then send the returned `receipt` to `POST /v1/verify`.
 
+For `POST /v1/files/plan`, IPFS is asked to calculate the CID without pinning.
+For `POST /v1/files`, the same inline bytes are pinned before the EFS write.
+
 To preview without storing a receipt, either use `POST /v1/files/plan` or set
 `"dry_run": true` in `options`.
 
@@ -83,6 +95,10 @@ Resolve the latest stored receipt for a path:
 ```bash
 curl 'http://localhost:3000/v1/resolve?path=%2Fagents%2Fdemo%2Fstatus.json'
 ```
+
+Receipts and resolve responses include mirror metadata such as
+`{ "transport": "ipfs", "uri": "ipfs://..." }` when retrievable bytes are
+declared.
 
 ## Modes
 
@@ -102,6 +118,9 @@ AGENT_KEY_DERIVATION_SECRET=<random deployment secret>
 PUBLIC_BASE_URL=https://your-public-service.example
 SEPOLIA_RPC_URL=<rpc url>
 SERVICE_SPONSOR_PRIVATE_KEY=<private key with Sepolia ETH>
+IPFS_API_URL=<kubo api url, recommended for retrievable files>
+# Optional, only if the IPFS API is protected by a reverse proxy.
+IPFS_API_AUTHORIZATION=<literal Authorization header value>
 ```
 
 On Railway, set `PUBLIC_BASE_URL` to the public Railway domain so receipt links
@@ -123,10 +142,22 @@ is what controls the derived EFS attester lens.
 
 ## Limits
 
-- Inline files are limited to 4096 decoded bytes and are used to compute
-  content facts. Add explicit mirrors when the bytes should be retrievable.
-- Larger files should use `hash_only` or `external_mirror_only` with one or more
-  mirrors.
+- Inline request bodies are limited to 10 MB decoded bytes.
+- With `IPFS_API_URL` configured, inline bytes default to an `ipfs://` mirror.
+- Service-side IPFS operations use a 10-request burst with a 5-request/minute
+  refill per authenticated actor.
+- File writes also use a 10-request burst with a 5-request/minute refill per
+  authenticated actor.
+- Scribe runs at most 2 concurrent IPFS adds per service process.
+- Each service-side IPFS operation may retry transient upstream failures up to
+  3 total attempts. Upstream `429` responses are not retried.
+- Use `options.storage = "metadata_only"` to skip service-side IPFS pinning.
+- Use `options.storage = "ipfs"` to require service-side IPFS pinning and fail
+  if it is not configured.
+- Use `hash_only` when you only want an EFS commitment to a hash. Hash-only is
+  cheaper but does not make bytes retrievable.
+- Larger files should be pinned elsewhere and submitted as
+  `external_mirror_only` with one or more mirrors.
 - A request can include up to 8 mirrors and 32 properties.
 
 ## Safety

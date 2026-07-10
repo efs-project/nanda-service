@@ -104,6 +104,9 @@ describe("SepoliaEfsWriter", () => {
     expect(receipt.efs.uids.file_anchor).toMatch(/^0x[0-9a-f]{64}$/);
     expect(receipt.efs.uids.placement_pin).toMatch(/^0x[0-9a-f]{64}$/);
     expect(receipt.efs.uids.mirrors).toHaveLength(1);
+    expect(receipt.efs.mirrors).toEqual([
+      { transport: "https", uri: "https://example.com/status.json" }
+    ]);
     expect(Object.keys(receipt.efs.uids.properties).sort()).toEqual([
       "contentHash",
       "contentType",

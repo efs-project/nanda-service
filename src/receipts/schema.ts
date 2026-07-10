@@ -10,6 +10,10 @@ const TxHashSchema = z.custom<`0x${string}`>(
 const UidSchema = z.custom<`0x${string}`>(
   (value) => typeof value === "string" && /^0x[0-9a-fA-F]{64}$/.test(value)
 );
+const MirrorMetadataSchema = z.object({
+  transport: z.string().min(1),
+  uri: z.string().min(1)
+});
 
 export const VerificationCheckSchema = z.object({
   name: z.string().min(1),
@@ -46,6 +50,7 @@ export const ReceiptSchema = z.object({
     tx_hashes: z.array(TxHashSchema),
     block_numbers: z.array(z.number().int().nonnegative()),
     path: z.string().min(1),
+    mirrors: z.array(MirrorMetadataSchema).default([]),
     uids: z.object({
       data: UidSchema,
       file_anchor: UidSchema,

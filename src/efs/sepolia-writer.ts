@@ -31,7 +31,7 @@ import type {
   VerificationResult,
   WriterContext
 } from "./writer.js";
-import { buildFileWritePlan } from "./write-plan.js";
+import { buildFileWritePlan, collectPlannedMirrors } from "./write-plan.js";
 
 interface SepoliaTransactionReceipt {
   status: "success" | "reverted";
@@ -271,6 +271,7 @@ export class SepoliaEfsWriter implements EfsWriter {
         tx_hashes: input.txHashes,
         block_numbers: input.blockNumbers,
         path: input.plan.path,
+        mirrors: collectPlannedMirrors(input.plan),
         uids: {
           data: dataUid,
           file_anchor: fileAnchorUid,

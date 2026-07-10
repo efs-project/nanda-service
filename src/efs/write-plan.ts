@@ -41,6 +41,11 @@ export class EfsWritePlanError extends Error {
   }
 }
 
+export interface PlannedMirrorMetadata {
+  transport: string;
+  uri: string;
+}
+
 export function normalizeEfsPath(path: string): NormalizedEfsPath {
   if (!path.startsWith("/")) {
     throw new EfsWritePlanError("EFS path must be absolute");
@@ -112,6 +117,20 @@ export function buildFileWritePlan(
       placementPin(normalizedPath)
     ].sort((left, right) => left.layer - right.layer || left.ref.localeCompare(right.ref))
   };
+}
+
+export function collectPlannedMirrors(plan: EfsWritePlan): PlannedMirrorMetadata[] {
+  return plan.layers
+    .filter((attestation) => attestation.ref.startsWith("mirror."))
+    .sort((left, right) => left.ref.localeCompare(right.ref))
+    .flatMap((attestation) => {
+      const transport = attestation.fields?.transport;
+      const uri = attestation.fields?.uri;
+      if (typeof transport !== "string" || typeof uri !== "string") {
+        return [];
+      }
+      return [{ transport, uri }];
+    });
 }
 
 function anchorAttestations(path: NormalizedEfsPath): PlannedAttestation[] {
@@ -284,7 +303,7 @@ function derivedSizeBytes(input: FileWriteRequest): number | undefined {
   if (input.content.mode === "hash_only") {
     return input.content.size_bytes;
   }
-  return undefined;
+  return input.content.size_bytes;
 }
 
 function payloadSha256(input: FileWriteRequest): `sha256:${string}` {
