@@ -50,7 +50,7 @@ describe("parseEnv", () => {
       missing: [],
       rpcUrl: "https://sepolia.example.test/rpc",
       easAddress: EFS_SEPOLIA.eas,
-      agentFundingTargetWei: 20_000_000_000_000_000n
+      agentFundingTargetWei: 50_000_000_000_000_000n
     });
     expect(config.ipfs).toEqual({
       apiUrl: "http://127.0.0.1:5001/api/v0",

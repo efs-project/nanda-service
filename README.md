@@ -155,6 +155,7 @@ point back to the hosted service instead of localhost.
 
 If derived agent wallets are funded another way, set
 `SEPOLIA_AGENT_FUNDING_TARGET_WEI=0` and omit `SERVICE_SPONSOR_PRIVATE_KEY`.
+The default automatic top-up target is 0.05 Sepolia ETH per derived agent wallet.
 The sample `local-scribe-key` is rejected in Sepolia mode.
 
 Receipt lookup is currently memory-only. On-chain writes remain on Sepolia, but
