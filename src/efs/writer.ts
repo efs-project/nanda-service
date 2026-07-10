@@ -19,6 +19,17 @@ const MAX_PROPERTY_KEY_CHARS = 96;
 const MAX_PROPERTY_VALUE_CHARS = 1024;
 const MAX_IDEMPOTENCY_KEY_CHARS = 128;
 const StorageStrategySchema = z.enum(["auto", "ipfs", "metadata_only"]);
+const AgentContextSchema = z
+  .object({
+    claimed_nanda_id: z.string().min(1).max(256).optional(),
+    label: z.string().min(1).max(128).optional()
+  })
+  .default({});
+const IdempotencyOptionsSchema = z
+  .object({
+    idempotency_key: z.string().min(1).max(MAX_IDEMPOTENCY_KEY_CHARS).optional()
+  })
+  .default({});
 
 const MirrorSchema = z.object({
   transport: z.enum(EFS_TRANSPORTS),
@@ -65,12 +76,7 @@ export const FileWriteRequestSchema = z.object({
   ]),
   mirrors: z.array(MirrorSchema).max(MAX_MIRRORS).default([]),
   properties: z.record(z.string().max(MAX_PROPERTY_VALUE_CHARS)).default({}),
-  agent: z
-    .object({
-      claimed_nanda_id: z.string().min(1).max(256).optional(),
-      label: z.string().min(1).max(128).optional()
-    })
-    .default({}),
+  agent: AgentContextSchema,
   options: z
     .object({
       dry_run: z.boolean().default(false),
@@ -98,8 +104,16 @@ export const FileWriteRequestSchema = z.object({
   }
 });
 
+export const FileRemoveRequestSchema = z.object({
+  path: z.string().min(1).max(MAX_PATH_CHARS).startsWith("/"),
+  agent: AgentContextSchema,
+  options: IdempotencyOptionsSchema
+});
+
 export type FileWriteRequest = z.infer<typeof FileWriteRequestSchema>;
 export type FileWriteRequestInput = z.input<typeof FileWriteRequestSchema>;
+export type FileRemoveRequest = z.infer<typeof FileRemoveRequestSchema>;
+export type FileRemoveRequestInput = z.input<typeof FileRemoveRequestSchema>;
 export type StorageStrategy = z.infer<typeof StorageStrategySchema>;
 
 export interface WriterContext {
@@ -150,7 +164,15 @@ export interface EfsWriter {
   planFile(input: FileWriteRequestInput, context: WriterContext): Promise<EfsWritePlan>;
   submitPlan(plan: EfsWritePlan, context: WriterContext): Promise<EfsScribeReceipt>;
   writeFile(input: FileWriteRequestInput, context: WriterContext): Promise<EfsScribeReceipt>;
+  removeFile(input: FileRemoveRequestInput, context: WriterContext): Promise<EfsScribeReceipt>;
   verifyReceipt(receipt: EfsScribeReceipt): Promise<VerificationResult>;
+}
+
+export class EfsFileRemoveError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "EfsFileRemoveError";
+  }
 }
 
 function isStrictBase64(value: string): boolean {

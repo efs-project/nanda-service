@@ -212,11 +212,23 @@ class FakeReadClient {
     args?: readonly unknown[];
   }): Promise<boolean>;
   async readContract(args: {
-    functionName: "rootAnchorUID" | "resolvePath" | "resolveAnchor" | "hasActiveTagFromAny";
+    functionName: "getActivePinSlot";
     args?: readonly unknown[];
-  }): Promise<Uid | boolean> {
+  }): Promise<{ pinUID: Uid; targetID: Uid }>;
+  async readContract(args: {
+    functionName:
+      | "rootAnchorUID"
+      | "resolvePath"
+      | "resolveAnchor"
+      | "hasActiveTagFromAny"
+      | "getActivePinSlot";
+    args?: readonly unknown[];
+  }): Promise<Uid | boolean | { pinUID: Uid; targetID: Uid }> {
     if (args.functionName === "rootAnchorUID") {
       return this.root;
+    }
+    if (args.functionName === "getActivePinSlot") {
+      return { pinUID: ZERO_UID, targetID: ZERO_UID };
     }
     if (args.functionName === "hasActiveTagFromAny") {
       const [target, definition, attesters] = args.args ?? [];

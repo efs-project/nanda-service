@@ -167,6 +167,109 @@ describe("SepoliaEfsWriter", () => {
     expect(receipt.efs.uids.placement_pin).toMatch(/^0x[0-9a-f]{64}$/);
   });
 
+  it("revokes the active file placement PIN when removing a file", async () => {
+    const root = uid(15);
+    const agents = uid(16);
+    const demo = uid(17);
+    const fileAnchor = uid(18);
+    const placementPin = uid(19);
+    const data = uid(20);
+    const publicClient = new FakeSepoliaPublicClient(
+      root,
+      {
+        [pathKey(root, "agents")]: agents,
+        [pathKey(agents, "demo")]: demo,
+        [anchorKey(demo, "status.json", EFS_SCHEMA_UIDS.DATA)]: fileAnchor
+      },
+      {
+        [pinSlotKey(fileAnchor, context.attester.address, EFS_SCHEMA_UIDS.DATA)]: {
+          pinUID: placementPin,
+          targetID: data
+        }
+      }
+    );
+    const agentWallet = new FakeSepoliaWallet(publicClient);
+    const writer = new SepoliaEfsWriter({
+      chainId: 11155111,
+      easAddress: EFS_SEPOLIA.eas,
+      indexerAddress: EFS_SEPOLIA.indexer,
+      publicClient,
+      walletClientFactory: () => agentWallet,
+      agentFundingTargetWei: 0n,
+      now: () => new Date("2026-07-08T00:00:00Z")
+    });
+
+    const receipt = await writer.removeFile(
+      {
+        path: "/agents/demo/status.json",
+        agent: { claimed_nanda_id: "agent:demo" },
+        options: { idempotency_key: "remove-status-001" }
+      },
+      context
+    );
+
+    expect(agentWallet.contractWrites).toHaveLength(1);
+    expect(agentWallet.contractWrites[0]).toMatchObject({
+      functionName: "multiRevoke",
+      account: { address: context.attester.address }
+    });
+    expect(agentWallet.contractWrites[0]?.args?.[0]).toEqual([
+      {
+        schema: EFS_SCHEMA_UIDS.PIN,
+        data: [{ uid: placementPin, value: 0n }]
+      }
+    ]);
+    expect(receipt).toMatchObject({
+      status: "confirmed",
+      mode: "sepolia",
+      operation: "file.remove",
+      efs: {
+        path: "/agents/demo/status.json",
+        uids: {
+          data,
+          file_anchor: fileAnchor,
+          placement_pin: placementPin
+        }
+      }
+    });
+    expect(receipt.efs.tx_hashes).toHaveLength(1);
+    expect(receipt.efs.block_numbers).toEqual([100]);
+    await expect(writer.verifyReceipt(receipt)).resolves.toMatchObject({ ok: true });
+  });
+
+  it("rejects removal when no active file placement exists for the agent", async () => {
+    const root = uid(24);
+    const agents = uid(25);
+    const demo = uid(26);
+    const fileAnchor = uid(27);
+    const publicClient = new FakeSepoliaPublicClient(root, {
+      [pathKey(root, "agents")]: agents,
+      [pathKey(agents, "demo")]: demo,
+      [anchorKey(demo, "status.json", EFS_SCHEMA_UIDS.DATA)]: fileAnchor
+    });
+    const agentWallet = new FakeSepoliaWallet(publicClient);
+    const writer = new SepoliaEfsWriter({
+      chainId: 11155111,
+      easAddress: EFS_SEPOLIA.eas,
+      indexerAddress: EFS_SEPOLIA.indexer,
+      publicClient,
+      walletClientFactory: () => agentWallet,
+      agentFundingTargetWei: 0n,
+      now: () => new Date("2026-07-08T00:00:00Z")
+    });
+
+    await expect(
+      writer.removeFile(
+        {
+          path: "/agents/demo/status.json",
+          agent: { claimed_nanda_id: "agent:demo" }
+        },
+        context
+      )
+    ).rejects.toThrow(/No active EFS file placement/);
+    expect(agentWallet.contractWrites).toHaveLength(0);
+  });
+
   it("classifies pre-send viem failures as Sepolia submit errors", async () => {
     const root = uid(21);
     const agents = uid(22);
@@ -305,6 +408,10 @@ function anchorKey(parent: Uid, name: string, forSchema: Uid): string {
   return `anchor:${parent}:${name}:${forSchema}`;
 }
 
+function pinSlotKey(definition: Uid, attester: Hex, targetSchema: Uid): string {
+  return `pin:${definition}:${attester.toLowerCase()}:${targetSchema}`;
+}
+
 function attestationCount(write: { args?: readonly unknown[] }): number {
   const requests = write.args?.[0] as { data: unknown[] }[] | undefined;
   return requests?.reduce((count, request) => count + request.data.length, 0) ?? 0;
@@ -317,7 +424,8 @@ class FakeSepoliaPublicClient {
 
   constructor(
     private readonly root: Uid,
-    private readonly paths: Record<string, Uid>
+    private readonly paths: Record<string, Uid>,
+    private readonly pinSlots: Record<string, { pinUID: Uid; targetID: Uid }> = {}
   ) {}
 
   async readContract(args: { functionName: "rootAnchorUID"; args?: readonly unknown[] }): Promise<Uid>;
@@ -328,11 +436,29 @@ class FakeSepoliaPublicClient {
     args?: readonly unknown[];
   }): Promise<boolean>;
   async readContract(args: {
-    functionName: "rootAnchorUID" | "resolvePath" | "resolveAnchor" | "hasActiveTagFromAny";
+    functionName: "getActivePinSlot";
     args?: readonly unknown[];
-  }): Promise<Uid | boolean> {
+  }): Promise<{ pinUID: Uid; targetID: Uid }>;
+  async readContract(args: {
+    functionName:
+      | "rootAnchorUID"
+      | "resolvePath"
+      | "resolveAnchor"
+      | "hasActiveTagFromAny"
+      | "getActivePinSlot";
+    args?: readonly unknown[];
+  }): Promise<Uid | boolean | { pinUID: Uid; targetID: Uid }> {
     if (args.functionName === "rootAnchorUID") {
       return this.root;
+    }
+    if (args.functionName === "getActivePinSlot") {
+      const [definition, attester, targetSchema] = args.args ?? [];
+      return (
+        this.pinSlots[pinSlotKey(definition as Uid, attester as Hex, targetSchema as Uid)] ?? {
+          pinUID: ZERO_UID,
+          targetID: ZERO_UID
+        }
+      );
     }
     if (args.functionName === "hasActiveTagFromAny") {
       return false;
@@ -370,7 +496,11 @@ class FakeSepoliaPublicClient {
 
 class FakeSepoliaWallet {
   readonly sentTransfers: { to: Hex; value: bigint }[] = [];
-  readonly contractWrites: { args?: readonly unknown[]; account?: { address?: Hex } }[] = [];
+  readonly contractWrites: {
+    args?: readonly unknown[];
+    account?: { address?: Hex };
+    functionName?: "multiAttest" | "multiRevoke";
+  }[] = [];
   private txCount = 1;
 
   constructor(private readonly publicClient: FakeSepoliaPublicClient) {}
@@ -382,10 +512,14 @@ class FakeSepoliaWallet {
     return hash;
   }
 
-  async writeContract(args: { args?: readonly unknown[]; account?: { address?: Hex } }): Promise<Hex> {
+  async writeContract(args: {
+    args?: readonly unknown[];
+    account?: { address?: Hex };
+    functionName?: "multiAttest" | "multiRevoke";
+  }): Promise<Hex> {
     this.contractWrites.push(args);
     const hash = uid(10000 + this.txCount++);
-    this.publicClient.registerWrite(hash, attestationSchemas(args));
+    this.publicClient.registerWrite(hash, args.functionName === "multiRevoke" ? [] : attestationSchemas(args));
     return hash;
   }
 }
@@ -397,7 +531,11 @@ class FailingSepoliaWallet {
 }
 
 class FailingAfterFirstWriteWallet extends FakeSepoliaWallet {
-  override async writeContract(args: { args?: readonly unknown[]; account?: { address?: Hex } }): Promise<Hex> {
+  override async writeContract(args: {
+    args?: readonly unknown[];
+    account?: { address?: Hex };
+    functionName?: "multiAttest" | "multiRevoke";
+  }): Promise<Hex> {
     if (this.contractWrites.length > 0) {
       throw new Error("layer two reverted");
     }

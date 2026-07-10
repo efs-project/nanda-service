@@ -8,30 +8,36 @@ import {
 import { privateKeyToAccount } from "viem/accounts";
 import { sepolia } from "viem/chains";
 
-import { EFS_SEPOLIA } from "../config/chains.js";
+import { EFS_SCHEMA_UIDS, EFS_SEPOLIA } from "../config/chains.js";
 import type { AppConfig } from "../config/env.js";
+import { sha256Hex } from "../lib/hash.js";
 import { ReceiptSchema, type EfsScribeReceipt, type VerificationCheck } from "../receipts/schema.js";
 import {
   EAS_MULTIATTEST_ABI,
   assertAttestedEventsMatch,
   buildMultiAttestLayer,
   extractAttestedEventsFromLogs,
+  type EasMultiRevocationRequest,
   type EasMultiAttestationRequest
 } from "./eas-requests.js";
 import {
+  EFS_EDGE_RESOLVER_ABI,
+  EFS_INDEXER_ABI,
   resolveSepoliaPreflight,
   type SepoliaReadClient
 } from "./sepolia-preflight.js";
 import type {
   EfsWriter,
   EfsWritePlan,
+  FileRemoveRequestInput,
   FileWriteRequestInput,
   Hex,
   Uid,
   VerificationResult,
   WriterContext
 } from "./writer.js";
-import { buildFileWritePlan, collectPlannedMirrors } from "./write-plan.js";
+import { EfsFileRemoveError, FileRemoveRequestSchema } from "./writer.js";
+import { buildFileWritePlan, collectPlannedMirrors, normalizeEfsPath } from "./write-plan.js";
 
 interface SepoliaTransactionReceipt {
   status: "success" | "reverted";
@@ -60,6 +66,14 @@ export interface SepoliaWalletClient {
     chain?: typeof sepolia;
     functionName: "multiAttest";
     args: readonly [EasMultiAttestationRequest[]];
+    value: bigint;
+  } | {
+    account?: Account;
+    address: Hex;
+    abi: typeof EAS_MULTIATTEST_ABI;
+    chain?: typeof sepolia;
+    functionName: "multiRevoke";
+    args: readonly [EasMultiRevocationRequest[]];
     value: bigint;
   }): Promise<Hex>;
 }
@@ -301,6 +315,60 @@ export class SepoliaEfsWriter implements EfsWriter {
     return this.submitPlan(plan, context);
   }
 
+  async removeFile(input: FileRemoveRequestInput, context: WriterContext): Promise<EfsScribeReceipt> {
+    const parsed = FileRemoveRequestSchema.parse(input);
+    const normalizedPath = normalizeEfsPath(parsed.path);
+    const agentAccount = privateKeyToAccount(context.attester.privateKey);
+    if (agentAccount.address.toLowerCase() !== context.attester.address.toLowerCase()) {
+      throw new SepoliaSubmitError("Derived agent account does not match the authenticated lens");
+    }
+
+    const resolved = await this.resolveRemovalTarget(normalizedPath, context);
+    if (isZeroUid(resolved.fileAnchorUid)) {
+      throw new EfsFileRemoveError("No EFS file anchor exists at this path");
+    }
+    if (isZeroUid(resolved.placementPinUid) || isZeroUid(resolved.dataUid)) {
+      throw new EfsFileRemoveError("No active EFS file placement exists for this agent at this path");
+    }
+
+    await this.ensureAgentFunding(context);
+    const walletClient = this.walletClientFactory(context.attester.privateKey);
+    let txHash: Hex;
+    try {
+      txHash = await walletClient.writeContract({
+        account: agentAccount,
+        address: this.easAddress,
+        abi: EAS_MULTIATTEST_ABI,
+        functionName: "multiRevoke",
+        args: [
+          [
+            {
+              schema: EFS_SCHEMA_UIDS.PIN,
+              data: [{ uid: resolved.placementPinUid, value: 0n }]
+            }
+          ]
+        ],
+        value: 0n,
+        chain: sepolia
+      });
+    } catch (error) {
+      throw new SepoliaSubmitError(
+        `Sepolia EAS multiRevoke transaction was not sent: ${errorMessage(error)}`
+      );
+    }
+    const receipt = await this.confirmTransaction(txHash, "Sepolia EAS multiRevoke");
+    return this.buildRemoveReceipt({
+      context,
+      input: parsed,
+      path: normalizedPath.canonicalPath,
+      dataUid: resolved.dataUid,
+      fileAnchorUid: resolved.fileAnchorUid,
+      placementPinUid: resolved.placementPinUid,
+      txHashes: [txHash],
+      blockNumbers: [toSafeBlockNumber(receipt.blockNumber)]
+    });
+  }
+
   async verifyReceipt(receipt: EfsScribeReceipt): Promise<VerificationResult> {
     const parsed = ReceiptSchema.safeParse(receipt);
     if (!parsed.success) {
@@ -329,6 +397,136 @@ export class SepoliaEfsWriter implements EfsWriter {
       { name: "sepolia_network", ok: parsed.data.efs.network === "sepolia" }
     ];
     return { ok: checks.every((check) => check.ok), checks };
+  }
+
+  private async resolveRemovalTarget(
+    path: ReturnType<typeof normalizeEfsPath>,
+    context: WriterContext
+  ): Promise<{ fileAnchorUid: Uid; placementPinUid: Uid; dataUid: Uid }> {
+    const rootAnchorUid = await this.publicClient.readContract({
+      address: this.indexerAddress,
+      abi: EFS_INDEXER_ABI,
+      functionName: "rootAnchorUID"
+    });
+    if (isZeroUid(rootAnchorUid)) {
+      throw new SepoliaSubmitError("EFSIndexer.rootAnchorUID() returned zero");
+    }
+
+    let parent = rootAnchorUid;
+    let fileAnchorUid = ZERO_UID;
+    for (const anchor of path.anchors) {
+      const uid = isZeroUid(anchor.forSchema)
+        ? await this.publicClient.readContract({
+            address: this.indexerAddress,
+            abi: EFS_INDEXER_ABI,
+            functionName: "resolvePath",
+            args: [parent, anchor.name]
+          })
+        : await this.publicClient.readContract({
+            address: this.indexerAddress,
+            abi: EFS_INDEXER_ABI,
+            functionName: "resolveAnchor",
+            args: [parent, anchor.name, anchor.forSchema]
+          });
+      if (isZeroUid(uid)) {
+        return { fileAnchorUid: ZERO_UID, placementPinUid: ZERO_UID, dataUid: ZERO_UID };
+      }
+      parent = uid;
+      fileAnchorUid = uid;
+    }
+
+    const slot = await this.publicClient.readContract({
+      address: EFS_SEPOLIA.edgeResolver,
+      abi: EFS_EDGE_RESOLVER_ABI,
+      functionName: "getActivePinSlot",
+      args: [fileAnchorUid, context.attester.address, EFS_SCHEMA_UIDS.DATA]
+    });
+    return {
+      fileAnchorUid,
+      placementPinUid: slot.pinUID,
+      dataUid: slot.targetID
+    };
+  }
+
+  private buildRemoveReceipt(input: {
+    context: WriterContext;
+    input: { options: { idempotency_key?: string } };
+    path: string;
+    dataUid: Uid;
+    fileAnchorUid: Uid;
+    placementPinUid: Uid;
+    txHashes: Hex[];
+    blockNumbers: number[];
+  }): EfsScribeReceipt {
+    const checkedAt = this.now().toISOString();
+    const canonicalRequestHash = sha256Hex({
+      auth: input.context.auth.authenticated_subject,
+      idempotencyKey: input.input.options.idempotency_key ?? null,
+      operation: "file.remove",
+      path: input.path
+    });
+    const receiptId = `rcpt_${canonicalRequestHash.slice(
+      "sha256:".length,
+      "sha256:".length + 24
+    )}`;
+    return ReceiptSchema.parse({
+      receipt_version: "efs-scribe-receipt/v1",
+      receipt_id: receiptId,
+      status: "confirmed",
+      mode: "sepolia",
+      operation: "file.remove",
+      created_at: checkedAt,
+      auth: input.context.auth,
+      agent_lens: {
+        attester: input.context.attester.address,
+        derivation: input.context.attester.derivation
+      },
+      integrity: {
+        payload_sha256: sha256Hex({ operation: "file.remove", path: input.path }),
+        metadata_sha256: sha256Hex({
+          attester: input.context.attester.address,
+          dataUid: input.dataUid,
+          fileAnchorUid: input.fileAnchorUid,
+          path: input.path
+        }),
+        canonical_request_sha256: canonicalRequestHash
+      },
+      efs: {
+        network: "sepolia",
+        chain_id: this.chainId,
+        eas: this.easAddress,
+        tx_hashes: input.txHashes,
+        block_numbers: input.blockNumbers,
+        path: input.path,
+        mirrors: [],
+        uids: {
+          data: input.dataUid,
+          file_anchor: input.fileAnchorUid,
+          placement_pin: input.placementPinUid,
+          mirrors: [],
+          properties: {}
+        }
+      },
+      verification: {
+        checked_at: checkedAt,
+        checks: sepoliaChecks({
+          chainId: this.chainId,
+          easAddress: this.easAddress,
+          txHashes: input.txHashes,
+          blockNumbers: input.blockNumbers,
+          refs: new Map([
+            ["data", input.dataUid],
+            [`anchor:${input.path}`, input.fileAnchorUid],
+            ["placement.pin", input.placementPinUid]
+          ])
+        })
+      },
+      links: {
+        self: `${input.context.publicBaseUrl}/v1/receipts/${receiptId}`,
+        verify: `${input.context.publicBaseUrl}/v1/verify`,
+        resolve: `${input.context.publicBaseUrl}/v1/resolve?path=${encodeURIComponent(input.path)}`
+      }
+    });
   }
 
   private async ensureAgentFunding(context: WriterContext): Promise<void> {
@@ -497,6 +695,10 @@ function isUid(value: unknown): boolean {
     /^0x[0-9a-fA-F]{64}$/.test(value) &&
     value.toLowerCase() !== ZERO_UID
   );
+}
+
+function isZeroUid(value: Uid): boolean {
+  return value.toLowerCase() === ZERO_UID;
 }
 
 function toSafeBlockNumber(blockNumber: bigint | null): number {

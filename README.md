@@ -2,12 +2,12 @@
 
 Agent-friendly EFS write receipts for local development and Sepolia testnet work.
 
-EFS Scribe gives agents a simple HTTP API for publishing EFS file records,
-pinning supplied bytes to IPFS when configured, previewing the EFS attestation
-plan, receiving receipts, resolving stored receipts by path, and verifying
-receipts later. It ships two modes: deterministic `offline` receipts for local
-development, and configured `sepolia` writes that submit real EAS `multiAttest`
-transactions.
+EFS Scribe gives agents a simple HTTP API for publishing and removing EFS file
+records, pinning supplied bytes to IPFS when configured, previewing the EFS
+attestation plan, receiving receipts, resolving stored receipts by path, and
+verifying receipts later. It ships two modes: deterministic `offline` receipts
+for local development, and configured `sepolia` writes/removals that submit
+real EAS transactions.
 
 ## Quick Start
 
@@ -78,6 +78,23 @@ curl -X POST http://localhost:3000/v1/files \
 
 Then send the returned `receipt` to `POST /v1/verify`.
 
+Remove the file from the authenticated agent lens:
+
+```bash
+curl -X POST http://localhost:3000/v1/files/delete \
+  -H 'content-type: application/json' \
+  -H 'authorization: Bearer local-scribe-key' \
+  -d '{
+    "path": "/agents/demo/status.json",
+    "agent": { "claimed_nanda_id": "agent:demo" },
+    "options": { "idempotency_key": "demo-status-delete-001" }
+  }'
+```
+
+On Sepolia, removal revokes the caller's active placement PIN for that path.
+It does not erase earlier EAS attestations, chain history, mirrors, or IPFS
+pins.
+
 For `POST /v1/files/plan`, IPFS is asked to calculate the CID without pinning.
 For `POST /v1/files`, the same inline bytes are pinned before the EFS write.
 
@@ -103,9 +120,9 @@ declared.
 ## Modes
 
 - `offline`: deterministic mock EFS receipts. No network or wallet required.
-- `sepolia`: real Sepolia EFS writes through EAS `multiAttest`. The derived
-  per-agent wallet signs as the EAS attester, and the sponsor key can top that
-  wallet up with Sepolia ETH.
+- `sepolia`: real Sepolia EFS writes/removals through EAS `multiAttest` and
+  `multiRevoke`. The derived per-agent wallet signs as the EAS attester, and
+  the sponsor key can top that wallet up with Sepolia ETH.
 
 Both modes use the same request and receipt shape.
 
@@ -146,8 +163,8 @@ is what controls the derived EFS attester lens.
 - With `IPFS_API_URL` configured, inline bytes default to an `ipfs://` mirror.
 - Service-side IPFS operations use a 10-request burst with a 5-request/minute
   refill per authenticated actor.
-- File writes also use a 10-request burst with a 5-request/minute refill per
-  authenticated actor.
+- File writes and removals also use a 10-request burst with a 5-request/minute
+  refill per authenticated actor.
 - Scribe runs at most 2 concurrent IPFS adds per service process.
 - Each service-side IPFS operation may retry transient upstream failures up to
   3 total attempts. Upstream `429` responses are not retried.

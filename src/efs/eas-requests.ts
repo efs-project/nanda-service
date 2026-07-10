@@ -34,6 +34,29 @@ export const EAS_MULTIATTEST_ABI = [
     ],
     outputs: [{ name: "", type: "bytes32[]" }]
   },
+  {
+    type: "function",
+    name: "multiRevoke",
+    stateMutability: "payable",
+    inputs: [
+      {
+        name: "multiRequests",
+        type: "tuple[]",
+        components: [
+          { name: "schema", type: "bytes32" },
+          {
+            name: "data",
+            type: "tuple[]",
+            components: [
+              { name: "uid", type: "bytes32" },
+              { name: "value", type: "uint256" }
+            ]
+          }
+        ]
+      }
+    ],
+    outputs: []
+  },
   parseAbiItem(EAS_ATTESTED_EVENT)
 ] as const;
 
@@ -51,6 +74,16 @@ export interface EasAttestationRequestData {
 export interface EasMultiAttestationRequest {
   schema: Uid;
   data: EasAttestationRequestData[];
+}
+
+export interface EasRevocationRequestData {
+  uid: Uid;
+  value: bigint;
+}
+
+export interface EasMultiRevocationRequest {
+  schema: Uid;
+  data: EasRevocationRequestData[];
 }
 
 export interface EasLayerRequests {

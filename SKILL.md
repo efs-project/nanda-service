@@ -17,8 +17,9 @@ Authorization: Bearer <api-key>
 x-api-key: <api-key>
 ```
 
-Only `POST /v1/files/plan` and `POST /v1/files` require auth. Reads,
-capabilities, receipt lookup, resolve, and verification are public.
+Only `POST /v1/files/plan`, `POST /v1/files`, and `POST /v1/files/delete`
+require auth. Reads, capabilities, receipt lookup, resolve, and verification
+are public.
 
 For NandaHack judging, use this key exactly:
 
@@ -54,6 +55,7 @@ Sepolia transactions, and IPFS mirrors are public.
 | `GET` | `https://efs-scribe-production.up.railway.app/openapi.json` | no | Machine-readable request shapes |
 | `POST` | `https://efs-scribe-production.up.railway.app/v1/files/plan` | yes | Preview a write; no Sepolia transaction |
 | `POST` | `https://efs-scribe-production.up.railway.app/v1/files` | yes | Write an EFS record on Sepolia |
+| `POST` | `https://efs-scribe-production.up.railway.app/v1/files/delete` | yes | Remove the caller's active EFS file placement |
 | `GET` | `https://efs-scribe-production.up.railway.app/v1/receipts/{receipt_id}` | no | Fetch an in-memory receipt |
 | `GET` | `https://efs-scribe-production.up.railway.app/v1/resolve?path=...` | no | Resolve the latest in-memory receipt for a path |
 | `POST` | `https://efs-scribe-production.up.railway.app/v1/verify` | no | Check receipt shape and self-consistency |
@@ -86,6 +88,20 @@ Sepolia transactions, and IPFS mirrors are public.
 Use `/v1/files/plan` for no-write previews. Do not rely on `options.dry_run` on
 `/v1/files`.
 
+`POST /v1/files/delete` uses a smaller body:
+
+```json
+{
+  "path": "/agents/example/status-2026-07-10.json",
+  "agent": { "claimed_nanda_id": "agent:example" },
+  "options": { "idempotency_key": "example-status-delete-2026-07-10-001" }
+}
+```
+
+Delete means "remove this file from my active EFS lens." On Sepolia, Scribe
+revokes the caller's active placement PIN. It does not erase earlier EAS
+attestations, chain history, mirrors, or IPFS pins.
+
 Important fields:
 
 - `path`: absolute EFS path. Use a fresh path for each new file.
@@ -95,9 +111,9 @@ Important fields:
 - `properties`: optional string metadata. Values must be strings.
 - `agent.claimed_nanda_id`: caller-supplied label. The API-key subject, not this
   label alone, controls the derived EFS attester.
-- `options.idempotency_key`: fresh key per new write. Same key plus same body
-  returns the same receipt while the process remembers it; same key plus
-  different body is an error.
+- `options.idempotency_key`: fresh key per new write or delete. Same key plus
+  same body returns the same receipt while the process remembers it; same key
+  plus different body is an error.
 - `options.storage`: usually omit this or set `auto`.
 
 ## Content And Storage
@@ -266,6 +282,39 @@ Response excerpt:
 
 Keep the whole `receipt` object.
 
+### Delete
+
+```bash
+curl -X POST "$EFS_SCRIBE_BASE/v1/files/delete" \
+  -H 'content-type: application/json' \
+  -H "authorization: Bearer $EFS_SCRIBE_API_KEY" \
+  -d '{
+    "path": "/agents/nandahack-judge/status-2026-07-10T120000Z.json",
+    "agent": { "claimed_nanda_id": "agent:nandahack-judge" },
+    "options": { "idempotency_key": "judge-status-delete-2026-07-10T120000Z" }
+  }'
+```
+
+Response excerpt:
+
+```json
+{
+  "receipt": {
+    "operation": "file.remove",
+    "status": "confirmed",
+    "efs": {
+      "path": "/agents/nandahack-judge/status-2026-07-10T120000Z.json",
+      "tx_hashes": ["0x..."],
+      "uids": {
+        "data": "0x...",
+        "file_anchor": "0x...",
+        "placement_pin": "0x..."
+      }
+    }
+  }
+}
+```
+
 ### Resolve
 
 ```bash
@@ -283,6 +332,7 @@ Response excerpt:
   "path": "/agents/nandahack-judge/status-2026-07-10T120000Z.json",
   "attester": "0x...",
   "receipt_id": "rcpt_abc123",
+  "operation": "file.upsert",
   "payload_sha256": "sha256:...",
   "mirrors": [{ "transport": "ipfs", "uri": "ipfs://bafy..." }],
   "links": {
@@ -328,7 +378,8 @@ Response excerpt:
   values must be strings.
 - `content_type`: 128 characters max.
 - `idempotency_key`: 128 characters max.
-- File writes: burst 10, then 5 writes per minute per authenticated actor.
+- File writes/removals: burst 10, then 5 operations per minute per
+  authenticated actor.
 - Service-side IPFS operations: burst 10, then 5 operations per minute per
   authenticated actor; at most 2 concurrent IPFS adds per service process.
 - IPFS add retries transient upstream failures up to 3 total attempts. Upstream
@@ -338,6 +389,9 @@ Response excerpt:
 
 Sepolia writes are permanent public testnet attestations. IPFS pins are public
 devnet infrastructure and should be treated as best-effort hackathon storage.
+
+Sepolia removals revoke an active placement PIN. They hide that file from the
+caller lens but do not delete public history or pinned bytes.
 
 `GET /v1/receipts/{receipt_id}`, `GET /v1/resolve`, and idempotency memory are
 process-local in this MVP. They work for receipts created since the current

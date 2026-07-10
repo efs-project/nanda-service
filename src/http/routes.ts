@@ -12,9 +12,12 @@ import { SepoliaPreflightError } from "../efs/sepolia-preflight.js";
 import { SepoliaSubmitError } from "../efs/sepolia-writer.js";
 import { EfsWritePlanError, normalizeEfsPath } from "../efs/write-plan.js";
 import {
+  EfsFileRemoveError,
+  FileRemoveRequestSchema,
   FileWriteRequestSchema,
   type EfsWritePlan,
   type EfsWriter,
+  type FileRemoveRequest,
   type FileWriteRequest,
   MAX_INLINE_CONTENT_BYTES,
   type WriterContext
@@ -91,6 +94,10 @@ export async function registerRoutes(
       void reply.status(400).send({ error: "bad_request", message: error.message });
       return;
     }
+    if (error instanceof EfsFileRemoveError) {
+      void reply.status(404).send({ error: "not_found", message: error.message });
+      return;
+    }
     if (error instanceof SepoliaPreflightError || error instanceof SepoliaSubmitError) {
       void reply.status(503).send(sepoliaErrorBody(error));
       return;
@@ -120,6 +127,7 @@ export async function registerRoutes(
       capabilities: "/v1/capabilities",
       plan_file: "/v1/files/plan",
       write_file: "/v1/files",
+      delete_file: "/v1/files/delete",
       verify_receipt: "/v1/verify"
     }
   }));
@@ -175,6 +183,32 @@ export async function registerRoutes(
           responses: {
             "200": {
               description: "Receipt for the EFS write",
+              content: {
+                "application/json": {
+                  schema: { $ref: "#/components/schemas/FileWriteResponse" }
+                }
+              }
+            }
+          }
+        }
+      },
+      "/v1/files/delete": {
+        post: {
+          summary: "Remove an EFS file placement from the authenticated agent lens",
+          description:
+            "Revokes the authenticated agent's active placement PIN for a file path. Chain history, anchors, DATA, mirrors, and IPFS pins are not erased.",
+          security: [{ bearerAuth: [] }],
+          requestBody: {
+            required: true,
+            content: {
+              "application/json": {
+                schema: { $ref: "#/components/schemas/FileRemoveRequest" }
+              }
+            }
+          },
+          responses: {
+            "200": {
+              description: "Receipt for the EFS removal",
               content: {
                 "application/json": {
                   schema: { $ref: "#/components/schemas/FileWriteResponse" }
@@ -299,6 +333,26 @@ export async function registerRoutes(
             links: { type: "object", additionalProperties: { type: "string" } }
           }
         },
+        FileRemoveRequest: {
+          type: "object",
+          required: ["path"],
+          properties: {
+            path: { type: "string", example: "/agents/demo/status.json" },
+            agent: {
+              type: "object",
+              properties: {
+                claimed_nanda_id: { type: "string", example: "agent:demo" },
+                label: { type: "string" }
+              }
+            },
+            options: {
+              type: "object",
+              properties: {
+                idempotency_key: { type: "string", maxLength: 128 }
+              }
+            }
+          }
+        },
         VerifyReceiptRequest: {
           type: "object",
           required: ["receipt"],
@@ -362,7 +416,7 @@ export async function registerRoutes(
       "/v1/resolve",
       "/v1/verify"
     ],
-    authenticated_endpoints: ["/v1/files/plan", "/v1/files"]
+    authenticated_endpoints: ["/v1/files/plan", "/v1/files", "/v1/files/delete"]
   }));
 
   app.post("/v1/files/plan", async (request: FastifyRequest) => {
@@ -413,6 +467,32 @@ export async function registerRoutes(
     return sendSubmission(_reply, submission);
   });
 
+  app.post("/v1/files/delete", async (request: FastifyRequest) => {
+    const parsed = FileRemoveRequestSchema.parse(request.body);
+    const context = writerContext(request, parsed, apiKeys, config);
+    const requestHash = originalRemoveRequestHash(parsed, context);
+    const idempotencyKey = parsed.options.idempotency_key;
+    if (idempotencyKey !== undefined) {
+      const existing = await receipts.getIdempotencyEntry(
+        context.auth.authenticated_subject,
+        idempotencyKey
+      );
+      if (existing !== undefined) {
+        assertSameOriginalIdempotentRequest(existing.requestHash, requestHash);
+        return { receipt: existing.receipt, links: existing.receipt.links };
+      }
+    }
+
+    writeRateLimiter.consume(context.auth.authenticated_subject);
+    const receipt = await writer.removeFile(parsed, context);
+    await receipts.save(receipt, {
+      authenticatedSubject: context.auth.authenticated_subject,
+      idempotencyKey,
+      idempotencyRequestHash: requestHash
+    });
+    return { receipt, links: receipt.links };
+  });
+
   app.get("/v1/receipts/:receiptId", async (request: FastifyRequest) => {
     const { receiptId } = request.params as { receiptId: string };
     const receipt = await receipts.get(receiptId);
@@ -435,6 +515,7 @@ export async function registerRoutes(
       path,
       attester: receipt.agent_lens.attester,
       receipt_id: receipt.receipt_id,
+      operation: receipt.operation,
       payload_sha256: receipt.integrity.payload_sha256,
       mirrors: receipt.efs.mirrors,
       uids: receipt.efs.uids,
@@ -530,7 +611,7 @@ function isAuthenticatedWriteRoute(method: string, url: string): boolean {
     return false;
   }
   const path = url.split("?")[0];
-  return path === "/v1/files" || path === "/v1/files/plan";
+  return path === "/v1/files" || path === "/v1/files/plan" || path === "/v1/files/delete";
 }
 
 class TokenBucketRateLimiter {
@@ -629,7 +710,7 @@ function extractApiKey(request: FastifyRequest): string | undefined {
 
 function writerContext(
   request: FastifyRequest,
-  parsed: FileWriteRequest,
+  parsed: FileWriteRequest | FileRemoveRequest,
   apiKeys: ApiKeyMap,
   config: AppConfig
 ): WriterContext {
@@ -796,12 +877,20 @@ function originalWriteRequestHash(parsed: FileWriteRequest, context: WriterConte
   });
 }
 
+function originalRemoveRequestHash(parsed: FileRemoveRequest, context: WriterContext): string {
+  return sha256Hex({
+    authenticatedSubject: context.auth.authenticated_subject,
+    operation: "file.remove",
+    request: parsed
+  });
+}
+
 function assertSameOriginalIdempotentRequest(
   storedRequestHash: string | undefined,
   originalRequestHash: string
 ): void {
   if (storedRequestHash !== undefined && storedRequestHash !== originalRequestHash) {
-    throw conflict("Idempotency key was already used for a different file write request");
+    throw conflict("Idempotency key was already used for a different request");
   }
 }
 

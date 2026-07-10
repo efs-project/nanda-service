@@ -1,16 +1,18 @@
 import { toMockUid } from "../lib/hash.js";
 import { ReceiptSchema, type EfsScribeReceipt, type VerificationCheck } from "../receipts/schema.js";
 import { encodePlannedAttestationData } from "./schema-encoding.js";
-import type {
-  EfsWriter,
-  EfsWritePlan,
-  FileWriteRequestInput,
-  PlannedAttestation,
-  Uid,
-  VerificationResult,
-  WriterContext
+import {
+  FileRemoveRequestSchema,
+  type EfsWriter,
+  type EfsWritePlan,
+  type FileRemoveRequestInput,
+  type FileWriteRequestInput,
+  type PlannedAttestation,
+  type Uid,
+  type VerificationResult,
+  type WriterContext
 } from "./writer.js";
-import { buildFileWritePlan, collectPlannedMirrors } from "./write-plan.js";
+import { buildFileWritePlan, collectPlannedMirrors, normalizeEfsPath } from "./write-plan.js";
 
 interface OfflineWriterOptions {
   now?: () => Date;
@@ -111,6 +113,75 @@ export class OfflineEfsWriter implements EfsWriter {
     return this.submitPlan(plan, context);
   }
 
+  async removeFile(input: FileRemoveRequestInput, context: WriterContext): Promise<EfsScribeReceipt> {
+    const parsed = FileRemoveRequestSchema.parse(input);
+    const path = normalizeEfsPath(parsed.path).canonicalPath;
+    const checkedAt = this.now().toISOString();
+    const canonicalRequestHash = sha256Like({
+      auth: context.auth.authenticated_subject,
+      idempotencyKey: parsed.options.idempotency_key ?? null,
+      operation: "file.remove",
+      path
+    });
+    const receiptId = `rcpt_${canonicalRequestHash.slice("sha256:".length, "sha256:".length + 24)}`;
+    const dataUid = toMockUid("offline-remove-data", {
+      attester: context.attester.address,
+      path
+    });
+    const fileAnchorUid = toMockUid("offline-remove-file-anchor", {
+      attester: context.attester.address,
+      path
+    });
+    const placementPinUid = toMockUid("offline-remove-placement-pin", {
+      attester: context.attester.address,
+      path
+    });
+
+    return ReceiptSchema.parse({
+      receipt_version: "efs-scribe-receipt/v1",
+      receipt_id: receiptId,
+      status: "confirmed",
+      mode: "offline",
+      operation: "file.remove",
+      created_at: checkedAt,
+      auth: context.auth,
+      agent_lens: {
+        attester: context.attester.address,
+        derivation: context.attester.derivation
+      },
+      integrity: {
+        payload_sha256: sha256Like({ operation: "file.remove", path }),
+        metadata_sha256: sha256Like({ attester: context.attester.address, path }),
+        canonical_request_sha256: canonicalRequestHash
+      },
+      efs: {
+        network: "offline",
+        chain_id: 0,
+        eas: null,
+        tx_hashes: [],
+        block_numbers: [],
+        path,
+        mirrors: [],
+        uids: {
+          data: dataUid,
+          file_anchor: fileAnchorUid,
+          placement_pin: placementPinUid,
+          mirrors: [],
+          properties: {}
+        }
+      },
+      verification: {
+        checked_at: checkedAt,
+        checks: offlineChecks({ dataUid, fileAnchorUid, placementPinUid })
+      },
+      links: {
+        self: `${context.publicBaseUrl}/v1/receipts/${receiptId}`,
+        verify: `${context.publicBaseUrl}/v1/verify`,
+        resolve: `${context.publicBaseUrl}/v1/resolve?path=${encodeURIComponent(path)}`
+      }
+    });
+  }
+
   async verifyReceipt(receipt: EfsScribeReceipt): Promise<VerificationResult> {
     const parsed = ReceiptSchema.safeParse(receipt);
     if (!parsed.success) {
@@ -127,6 +198,11 @@ export class OfflineEfsWriter implements EfsWriter {
     });
     return { ok: checks.every((check) => check.ok), checks };
   }
+}
+
+function sha256Like(value: unknown): `sha256:${string}` {
+  const uid = toMockUid("offline-sha256", value).slice(2);
+  return `sha256:${uid}`;
 }
 
 function resolveRef(ref: PlannedAttestation["refUID"], minted: Map<string, Uid>): Uid {

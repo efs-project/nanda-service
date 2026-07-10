@@ -49,6 +49,29 @@ describe("OfflineEfsWriter", () => {
     expect(first.efs.uids.data).toMatch(/^0x[0-9a-f]{64}$/);
   });
 
+  it("creates deterministic receipts for identical removes", async () => {
+    const writer = new OfflineEfsWriter({ now: () => new Date("2026-07-08T00:00:00Z") });
+    const removeRequest = {
+      path: "/agents/demo/status.json",
+      agent: {
+        claimed_nanda_id: "agent:demo"
+      },
+      options: {
+        idempotency_key: "demo-status-delete-001"
+      }
+    };
+    const first = await writer.removeFile(removeRequest, contextFor("local-scribe-key"));
+    const second = await writer.removeFile(removeRequest, contextFor("local-scribe-key"));
+
+    expect(first).toEqual(second);
+    expect(first.mode).toBe("offline");
+    expect(first.operation).toBe("file.remove");
+    expect(first.efs.network).toBe("offline");
+    expect(first.efs.path).toBe("/agents/demo/status.json");
+    expect(first.efs.uids.placement_pin).toMatch(/^0x[0-9a-f]{64}$/);
+    expect(first.efs.mirrors).toEqual([]);
+  });
+
   it("changes the data uid when payload bytes change", async () => {
     const writer = new OfflineEfsWriter({ now: () => new Date("2026-07-08T00:00:00Z") });
     const first = await writer.writeFile(request, contextFor("local-scribe-key"));

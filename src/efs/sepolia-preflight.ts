@@ -45,6 +45,26 @@ export const EFS_EDGE_RESOLVER_ABI = [
       { name: "attesters", type: "address[]" }
     ],
     outputs: [{ name: "", type: "bool" }]
+  },
+  {
+    type: "function",
+    name: "getActivePinSlot",
+    stateMutability: "view",
+    inputs: [
+      { name: "definition", type: "bytes32" },
+      { name: "attester", type: "address" },
+      { name: "targetSchema", type: "bytes32" }
+    ],
+    outputs: [
+      {
+        name: "",
+        type: "tuple",
+        components: [
+          { name: "pinUID", type: "bytes32" },
+          { name: "targetID", type: "bytes32" }
+        ]
+      }
+    ]
   }
 ] as const;
 
@@ -72,6 +92,12 @@ export interface SepoliaReadClient {
     functionName: "hasActiveTagFromAny";
     args: readonly [Uid, Uid, readonly Hex[]];
   }): Promise<boolean>;
+  readContract(args: {
+    address?: Hex;
+    abi?: typeof EFS_EDGE_RESOLVER_ABI;
+    functionName: "getActivePinSlot";
+    args: readonly [Uid, Hex, Uid];
+  }): Promise<{ pinUID: Uid; targetID: Uid }>;
 }
 
 export interface SepoliaPreflightOptions {

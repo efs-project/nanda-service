@@ -26,7 +26,7 @@ export const ReceiptSchema = z.object({
   receipt_id: z.string().min(1),
   status: z.enum(["planned", "pending", "confirmed", "failed"]),
   mode: z.enum(["offline", "sepolia"]),
-  operation: z.literal("file.upsert"),
+  operation: z.enum(["file.upsert", "file.remove"]),
   created_at: z.string().datetime(),
   auth: z.object({
     method: z.enum(["api_key", "signed_agent", "none"]),

@@ -32,6 +32,16 @@ const writeBody = {
   }
 };
 
+const removeBody = {
+  path: "/agents/demo/status.json",
+  agent: {
+    claimed_nanda_id: "agent:demo"
+  },
+  options: {
+    idempotency_key: "demo-status-delete-001"
+  }
+};
+
 describe("HTTP API", () => {
   it("rejects Sepolia mode until required chain configuration is present", async () => {
     await expect(
@@ -84,7 +94,8 @@ describe("HTTP API", () => {
         skill: "/skill.md",
         skill_canonical: "/SKILL.md",
         openapi: "/openapi.json",
-        capabilities: "/v1/capabilities"
+        capabilities: "/v1/capabilities",
+        delete_file: "/v1/files/delete"
       }
     });
     expect(health.statusCode).toBe(200);
@@ -162,6 +173,11 @@ describe("HTTP API", () => {
               "Checks receipt shape and self-consistency. This is not an independent Sepolia indexer."
           }
         },
+        "/v1/files/delete": {
+          post: {
+            summary: "Remove an EFS file placement from the authenticated agent lens"
+          }
+        },
         "/skill.md": {
           get: {
             summary: "Agent-facing skill instructions"
@@ -192,6 +208,9 @@ describe("HTTP API", () => {
               transport: { enum: [...EFS_TRANSPORTS] }
             }
           },
+          FileRemoveRequest: {
+            required: ["path"]
+          },
           VerifyReceiptRequest: {
             required: ["receipt"]
           }
@@ -202,7 +221,7 @@ describe("HTTP API", () => {
     await app.close();
   });
 
-  it("requires auth for file writes", async () => {
+  it("requires auth for file writes and removals", async () => {
     const app = await buildApp({
       mode: "offline",
       apiKeysJson: '{"local-scribe-key":"api-key:local-scribe-agent"}',
@@ -211,14 +230,21 @@ describe("HTTP API", () => {
       logLevel: "silent"
     });
 
-    const response = await app.inject({
+    const write = await app.inject({
       method: "POST",
       url: "/v1/files",
       payload: writeBody
     });
+    const remove = await app.inject({
+      method: "POST",
+      url: "/v1/files/delete",
+      payload: removeBody
+    });
 
-    expect(response.statusCode).toBe(401);
-    expect(response.json()).toMatchObject({ error: "unauthorized" });
+    expect(write.statusCode).toBe(401);
+    expect(write.json()).toMatchObject({ error: "unauthorized" });
+    expect(remove.statusCode).toBe(401);
+    expect(remove.json()).toMatchObject({ error: "unauthorized" });
 
     await app.close();
   });
@@ -274,6 +300,65 @@ describe("HTTP API", () => {
 
     expect(verify.statusCode).toBe(200);
     expect(verify.json()).toMatchObject({ ok: true });
+
+    await app.close();
+  });
+
+  it("removes and verifies an offline receipt", async () => {
+    const app = await buildApp({
+      mode: "offline",
+      apiKeysJson: '{"local-scribe-key":"api-key:local-scribe-agent"}',
+      derivationSecret: "unit-test-secret",
+      publicBaseUrl: "http://localhost:3000",
+      logLevel: "silent"
+    });
+
+    const remove = await app.inject({
+      method: "POST",
+      url: "/v1/files/delete",
+      headers: { authorization: "Bearer local-scribe-key" },
+      payload: removeBody
+    });
+
+    expect(remove.statusCode).toBe(200);
+    const receipt = remove.json().receipt;
+    expect(receipt).toMatchObject({
+      status: "confirmed",
+      mode: "offline",
+      operation: "file.remove",
+      efs: {
+        path: "/agents/demo/status.json",
+        mirrors: []
+      }
+    });
+
+    const retry = await app.inject({
+      method: "POST",
+      url: "/v1/files/delete",
+      headers: { authorization: "Bearer local-scribe-key" },
+      payload: removeBody
+    });
+    expect(retry.statusCode).toBe(200);
+    expect(retry.json().receipt).toEqual(receipt);
+
+    const verify = await app.inject({
+      method: "POST",
+      url: "/v1/verify",
+      payload: { receipt }
+    });
+    expect(verify.statusCode).toBe(200);
+    expect(verify.json()).toMatchObject({ ok: true });
+
+    const resolved = await app.inject({
+      method: "GET",
+      url: "/v1/resolve?path=%2Fagents%2Fdemo%2Fstatus.json"
+    });
+    expect(resolved.statusCode).toBe(200);
+    expect(resolved.json()).toMatchObject({
+      operation: "file.remove",
+      receipt_id: receipt.receipt_id,
+      mirrors: []
+    });
 
     await app.close();
   });
