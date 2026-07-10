@@ -159,7 +159,6 @@ export class SepoliaEfsWriter implements EfsWriter {
     if (agentAccount.address.toLowerCase() !== context.attester.address.toLowerCase()) {
       throw new SepoliaSubmitError("Derived agent account does not match the authenticated lens");
     }
-    await this.ensureAgentFunding(context);
 
     const walletClient = this.walletClientFactory(context.attester.privateKey);
     const txHashes: Hex[] = [];
@@ -171,6 +170,8 @@ export class SepoliaEfsWriter implements EfsWriter {
         if (layerRequests.flatRefs.length === 0) {
           continue;
         }
+
+        await this.ensureAgentFunding(context);
 
         let txHash: Hex;
         try {

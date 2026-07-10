@@ -123,6 +123,47 @@ describe("SepoliaEfsWriter", () => {
     await expect(writer.verifyReceipt(receipt)).resolves.toMatchObject({ ok: true });
   });
 
+  it("refunds the derived agent wallet between Sepolia write layers when gas drains it", async () => {
+    const root = uid(61);
+    const agents = uid(62);
+    const demo = uid(63);
+    const publicClient = new FakeSepoliaPublicClient(root, {
+      [pathKey(root, "agents")]: agents,
+      [pathKey(agents, "demo")]: demo,
+      [anchorKey(demo, "status.json", EFS_SCHEMA_UIDS.DATA)]: ZERO_UID
+    });
+    const sponsorWallet = new FakeSepoliaWallet(publicClient);
+    const agentWallet = new FakeSepoliaWallet(publicClient, 600_000n);
+    const writer = new SepoliaEfsWriter({
+      chainId: 11155111,
+      easAddress: EFS_SEPOLIA.eas,
+      indexerAddress: EFS_SEPOLIA.indexer,
+      publicClient,
+      sponsorWallet,
+      walletClientFactory: () => agentWallet,
+      agentFundingTargetWei: 1_000_000n,
+      now: () => new Date("2026-07-08T00:00:00Z")
+    });
+
+    const receipt = await writer.writeFile(
+      {
+        path: "/agents/demo/status.json",
+        content: {
+          mode: "hash_only",
+          payload_sha256:
+            "sha256:43258cff783fe7036d8a43033f830adfc60ec037382473548ac742b888292777"
+        }
+      },
+      context
+    );
+
+    expect(receipt.status).toBe("confirmed");
+    expect(sponsorWallet.sentTransfers.length).toBeGreaterThan(1);
+    expect(sponsorWallet.sentTransfers.every((transfer) => transfer.to === context.attester.address)).toBe(
+      true
+    );
+  });
+
   it("can place a new DATA at an already-existing file anchor", async () => {
     const root = uid(11);
     const agents = uid(12);
@@ -536,6 +577,7 @@ function attestationCount(write: { args?: readonly unknown[] }): number {
 
 class FakeSepoliaPublicClient {
   private readonly pendingReceipts = new Map<Hex, Uid[]>();
+  private readonly balances = new Map<Hex, bigint>();
   private nextUid = 1000;
   private nextBlock = 100n;
 
@@ -589,8 +631,20 @@ class FakeSepoliaPublicClient {
     return this.paths[pathKey(parent as Uid, String(name))] ?? ZERO_UID;
   }
 
-  async getBalance(): Promise<bigint> {
-    return 0n;
+  async getBalance(args: { address: Hex }): Promise<bigint> {
+    return this.balances.get(args.address) ?? 0n;
+  }
+
+  creditBalance(address: Hex, value: bigint): void {
+    this.balances.set(address, (this.balances.get(address) ?? 0n) + value);
+  }
+
+  debitBalance(address: Hex, value: bigint): void {
+    const balance = this.balances.get(address) ?? 0n;
+    if (balance < value) {
+      throw new Error("insufficient test balance");
+    }
+    this.balances.set(address, balance - value);
   }
 
   registerWrite(hash: Hex, schemas: Uid[]): void {
@@ -621,11 +675,15 @@ class FakeSepoliaWallet {
   }[] = [];
   private txCount = 1;
 
-  constructor(private readonly publicClient: FakeSepoliaPublicClient) {}
+  constructor(
+    private readonly publicClient: FakeSepoliaPublicClient,
+    private readonly writeCostWei = 0n
+  ) {}
 
   async sendTransaction(args: { to: Hex; value: bigint }): Promise<Hex> {
     this.sentTransfers.push(args);
     const hash = uid(9000 + this.txCount++);
+    this.publicClient.creditBalance(args.to, args.value);
     this.publicClient.registerWrite(hash, []);
     return hash;
   }
@@ -636,6 +694,9 @@ class FakeSepoliaWallet {
     functionName?: "multiAttest" | "multiRevoke";
   }): Promise<Hex> {
     this.contractWrites.push(args);
+    if (this.writeCostWei > 0n && args.account?.address !== undefined) {
+      this.publicClient.debitBalance(args.account.address, this.writeCostWei);
+    }
     const hash = uid(10000 + this.txCount++);
     this.publicClient.registerWrite(hash, args.functionName === "multiRevoke" ? [] : attestationSchemas(args));
     return hash;
