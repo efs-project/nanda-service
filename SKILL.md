@@ -1,8 +1,10 @@
 # EFS Scribe
 
-EFS Scribe lets a Nanda agent publish a small public file record to EFS on
-Sepolia and return a receipt. The hosted service pins inline bytes to IPFS and
-records the `ipfs://` mirror in EFS.
+EFS Scribe lets a Nanda agent write and read small public files through EFS on
+Sepolia. The simple API is `PUT /v1/files?path=...` to write bytes and
+`GET /v1/files?path=...` to read bytes. Under the hood, hosted Scribe pins
+bytes to IPFS, records the `ipfs://` mirror in EFS, and verifies the payload
+hash before returning bytes on read.
 
 Base URL:
 
@@ -17,9 +19,10 @@ Authorization: Bearer <api-key>
 x-api-key: <api-key>
 ```
 
-Only `POST /v1/files/plan`, `POST /v1/files`, and `POST /v1/files/delete`
-require auth. Delete also requires a delete-enabled API key. Reads,
-capabilities, receipt lookup, resolve, and verification are public.
+`PUT /v1/files`, `POST /v1/files/plan`, `POST /v1/files`, and
+`POST /v1/files/delete` require auth. Delete also requires a delete-enabled API
+key. Byte reads, capabilities, receipt lookup, resolve, and verification are
+public.
 
 For NandaHack judging, use this key exactly for plan/write/verify:
 
@@ -38,14 +41,16 @@ records, Sepolia transactions, and IPFS mirrors are public.
 1. Call `GET /v1/capabilities`.
 2. Pick a fresh path, for example
    `/agents/nandahack-judge/status-<timestamp>.json`.
-3. Use `inline_base64` for a small public JSON payload.
-4. Call `POST /v1/files/plan`. This predicts the IPFS CID and EFS attestations,
-   but does not submit a transaction or pin bytes.
-5. Call `POST /v1/files` with a fresh `idempotency_key`.
-6. Keep the returned `receipt`.
-7. Call `POST /v1/verify` with that receipt.
-8. Reply with `receipt_id`, `status`, first `tx_hash`, IPFS mirror URI, and the
-   resolve link.
+3. Call `PUT /v1/files?path=...` with a small public byte body and a fresh
+   `Idempotency-Key` header.
+4. Keep the returned `receipt`.
+5. Call `GET /v1/files?path=...` to read the bytes back.
+6. Call `POST /v1/verify` with the receipt.
+7. Reply with `receipt_id`, `status`, first `tx_hash`, IPFS mirror URI, read
+   result, and the resolve link.
+
+Use `POST /v1/files/plan` only when you need a no-write preview of the EFS
+attestations.
 
 ## Live Endpoints
 
@@ -55,6 +60,8 @@ records, Sepolia transactions, and IPFS mirrors are public.
 | `GET` | `https://efs-scribe-production.up.railway.app/health` | no | Liveness check |
 | `GET` | `https://efs-scribe-production.up.railway.app/v1/capabilities` | no | Modes, limits, EFS Sepolia addresses |
 | `GET` | `https://efs-scribe-production.up.railway.app/openapi.json` | no | Machine-readable request shapes |
+| `PUT` | `https://efs-scribe-production.up.railway.app/v1/files?path=...` | yes | Write raw bytes to an EFS path |
+| `GET` | `https://efs-scribe-production.up.railway.app/v1/files?path=...` | no | Read verified raw bytes from an EFS path |
 | `POST` | `https://efs-scribe-production.up.railway.app/v1/files/plan` | yes | Preview a write; no Sepolia transaction |
 | `POST` | `https://efs-scribe-production.up.railway.app/v1/files` | yes | Write an EFS record on Sepolia |
 | `POST` | `https://efs-scribe-production.up.railway.app/v1/files/delete` | delete-enabled key | Remove the caller's active EFS file placement |
@@ -65,7 +72,61 @@ records, Sepolia transactions, and IPFS mirrors are public.
 
 `/SKILL.md` also works.
 
-## Request Body
+## Simple Byte API
+
+For most agents, use this API first.
+
+Write bytes:
+
+```bash
+curl -X PUT "$EFS_SCRIBE_BASE/v1/files?path=%2Fagents%2Fexample%2Fstatus.json" \
+  -H "authorization: Bearer $EFS_SCRIBE_API_KEY" \
+  -H 'content-type: application/json' \
+  -H 'idempotency-key: example-status-bytes-001' \
+  -H 'x-nanda-agent: agent:example' \
+  --data-binary '{"ok":true}'
+```
+
+Response excerpt:
+
+```json
+{
+  "ok": true,
+  "path": "/agents/example/status.json",
+  "content_type": "application/json",
+  "size_bytes": 11,
+  "payload_sha256": "sha256:...",
+  "receipt_id": "rcpt_...",
+  "receipt": { "operation": "file.upsert", "status": "confirmed" },
+  "links": {
+    "read": "https://efs-scribe-production.up.railway.app/v1/files?path=...",
+    "resolve": "https://efs-scribe-production.up.railway.app/v1/resolve?path=...",
+    "receipt": "https://efs-scribe-production.up.railway.app/v1/receipts/rcpt_...",
+    "verify": "https://efs-scribe-production.up.railway.app/v1/verify"
+  }
+}
+```
+
+Read bytes:
+
+```bash
+curl --get "$EFS_SCRIBE_BASE/v1/files" \
+  --data-urlencode 'path=/agents/example/status.json'
+```
+
+`GET /v1/files?path=...` returns raw bytes. Check response headers for
+`x-efs-payload-sha256`, `x-efs-scribe-receipt-id`, `etag`, and `digest`.
+Scribe verifies the fetched IPFS bytes against the EFS payload hash before
+returning them.
+
+Optional write headers:
+
+- `Idempotency-Key`: fresh key per new write. Strongly recommended.
+- `X-Nanda-Agent`: caller-supplied label such as `agent:example`.
+- `X-EFS-Storage`: `ipfs`, `auto`, or `metadata_only`. Omit this for byte
+  writes. The default is `ipfs` so reads work later.
+
+## EFS-Native Request Body
 
 `POST /v1/files/plan` and `POST /v1/files` use the same JSON body:
 
@@ -138,6 +199,11 @@ Storage options:
 If `auto` or `ipfs` tries IPFS and pinning fails, the request returns
 `503 ipfs_pin_error`. It does not fall back to metadata-only.
 
+Byte reads require a latest confirmed write receipt with an `ipfs://` mirror.
+If the latest receipt is a delete, hash-only record, metadata-only record, or a
+record without an IPFS mirror, `GET /v1/files?path=...` returns an error instead
+of bytes.
+
 ## Examples
 
 Set common variables:
@@ -162,6 +228,11 @@ Response excerpt:
   "receipt_version": "efs-scribe-receipt/v1",
   "writes_require_auth": true,
   "deletes_require_delete_enabled_key": true,
+  "byte_api": {
+    "write": "PUT /v1/files?path=<absolute-path>",
+    "read": "GET /v1/files?path=<absolute-path>",
+    "write_default_storage": "ipfs"
+  },
   "content_modes": ["inline_base64", "hash_only", "external_mirror_only"],
   "inline_content_limit_bytes": 10485760,
   "storage": {
@@ -399,10 +470,10 @@ caller lens but do not delete public history or pinned bytes. The public
 NandaHack key is shared and intentionally cannot delete; use a private
 delete-enabled key for this endpoint.
 
-`GET /v1/receipts/{receipt_id}`, `GET /v1/resolve`, and idempotency memory are
-process-local in this MVP. They work for receipts created since the current
-service process started. If the service restarts, keep your original receipt and
-transaction hashes.
+`GET /v1/files?path=...`, `GET /v1/receipts/{receipt_id}`, `GET /v1/resolve`,
+and idempotency memory are process-local in this MVP. They work for receipts
+created since the current service process started. If the service restarts, keep
+your original receipt, transaction hashes, and IPFS mirror URI.
 
 `POST /v1/verify` checks receipt shape and self-consistency. It is not an
 independent Sepolia indexer.

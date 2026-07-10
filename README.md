@@ -2,12 +2,14 @@
 
 Agent-friendly EFS write receipts for local development and Sepolia testnet work.
 
-EFS Scribe gives agents a simple HTTP API for publishing and removing EFS file
-records, pinning supplied bytes to IPFS when configured, previewing the EFS
-attestation plan, receiving receipts, resolving stored receipts by path, and
-verifying receipts later. It ships two modes: deterministic `offline` receipts
-for local development, and configured `sepolia` writes/removals that submit
-real EAS transactions.
+EFS Scribe gives agents a simple HTTP API for writing, reading, and removing
+public EFS files. The byte API pins supplied bytes to IPFS, writes an EFS
+record, returns a receipt, and reads bytes back by resolving the receipt,
+fetching the IPFS mirror, and verifying the payload hash. It also exposes the
+lower-level EFS plan/receipt endpoints for agents that want attestation detail.
+
+It ships two modes: deterministic `offline` receipts for local development, and
+configured `sepolia` writes/removals that submit real EAS transactions.
 
 ## Quick Start
 
@@ -30,6 +32,28 @@ low.
 curl http://localhost:3000/health
 curl http://localhost:3000/v1/capabilities
 ```
+
+For most agents, write bytes to a path:
+
+```bash
+curl -X PUT 'http://localhost:3000/v1/files?path=%2Fagents%2Fdemo%2Fstatus.json' \
+  -H 'authorization: Bearer local-scribe-key' \
+  -H 'content-type: application/json' \
+  -H 'idempotency-key: demo-status-bytes-001' \
+  -H 'x-nanda-agent: agent:demo' \
+  --data-binary '{"ok":true}'
+```
+
+Then read the bytes back:
+
+```bash
+curl 'http://localhost:3000/v1/files?path=%2Fagents%2Fdemo%2Fstatus.json'
+```
+
+`PUT /v1/files?path=...` returns a compact JSON response with the receipt ID,
+payload hash, receipt, and links. `GET /v1/files?path=...` returns verified raw
+bytes. Byte writes default to IPFS-backed storage; if IPFS is unavailable, the
+write fails instead of silently creating a non-retrievable record.
 
 Preview the EFS plan for a write:
 
@@ -97,10 +121,10 @@ It does not erase earlier EAS attestations, chain history, mirrors, or IPFS
 pins.
 
 For `POST /v1/files/plan`, IPFS is asked to calculate the CID without pinning.
-For `POST /v1/files`, the same inline bytes are pinned before the EFS write.
+For `PUT /v1/files?path=...` and `POST /v1/files`, inline bytes are pinned
+before the EFS write.
 
-To preview without storing a receipt, either use `POST /v1/files/plan` or set
-`"dry_run": true` in `options`.
+To preview without storing a receipt, use `POST /v1/files/plan`.
 
 Fetch the receipt again:
 
@@ -117,6 +141,11 @@ curl 'http://localhost:3000/v1/resolve?path=%2Fagents%2Fdemo%2Fstatus.json'
 Receipts and resolve responses include mirror metadata such as
 `{ "transport": "ipfs", "uri": "ipfs://..." }` when retrievable bytes are
 declared.
+
+Byte reads are currently backed by the in-memory receipt index. If the service
+restarts, keep the original receipt and mirror URI; the current MVP does not
+yet include a Sepolia indexer that can rebuild `/v1/files?path=...` reads from
+chain history alone.
 
 ## Modes
 
@@ -172,7 +201,9 @@ is what controls the derived EFS attester lens.
 ## Limits
 
 - Inline request bodies are limited to 10 MB decoded bytes.
+- Raw byte writes are limited to 10 MB.
 - With `IPFS_API_URL` configured, inline bytes default to an `ipfs://` mirror.
+- Byte reads require an IPFS mirror and a configured or derived IPFS gateway.
 - Service-side IPFS operations use a 10-request burst with a 5-request/minute
   refill per authenticated actor.
 - File writes and removals also use a 10-request burst with a 5-request/minute

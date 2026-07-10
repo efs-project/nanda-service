@@ -22,12 +22,24 @@ export function badRequest(message: string): HttpError {
   return new HttpError(400, "bad_request", message);
 }
 
+export function payloadTooLarge(message: string): HttpError {
+  return new HttpError(413, "payload_too_large", message);
+}
+
 export function conflict(message: string): HttpError {
   return new HttpError(409, "conflict", message);
 }
 
+export function bytesUnavailable(message: string): HttpError {
+  return new HttpError(409, "bytes_unavailable", message);
+}
+
 export function notFound(message: string): HttpError {
   return new HttpError(404, "not_found", message);
+}
+
+export function badGateway(code: string, message: string): HttpError {
+  return new HttpError(502, code, message);
 }
 
 export function rateLimited(message: string): HttpError {

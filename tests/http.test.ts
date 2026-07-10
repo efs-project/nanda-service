@@ -12,6 +12,7 @@ import {
   EfsFileWriteConflictError,
   type EfsWritePlan,
   type EfsWriter,
+  MAX_INLINE_CONTENT_BYTES,
   type WriterContext
 } from "../src/efs/writer.js";
 import { registerRoutes } from "../src/http/routes.js";
@@ -501,6 +502,332 @@ describe("HTTP API", () => {
 
     await app.close();
     await ipfs.close();
+  });
+
+  it("writes and reads raw file bytes through the simple byte API", async () => {
+    const ipfs = await startFakeIpfs();
+    const app = await buildApp({
+      mode: "offline",
+      apiKeysJson: '{"local-scribe-key":"api-key:local-scribe-agent"}',
+      derivationSecret: "unit-test-secret",
+      publicBaseUrl: "http://localhost:3000",
+      logLevel: "silent",
+      ipfs: { apiUrl: ipfs.url, gatewayUrl: ipfs.gatewayUrl }
+    });
+    const bytes = Buffer.from('{"ok":true}', "utf8");
+
+    const write = await app.inject({
+      method: "PUT",
+      url: "/v1/files?path=%2Fagents%2Fdemo%2Fraw-status.json",
+      headers: {
+        authorization: "Bearer local-scribe-key",
+        "content-type": "application/json",
+        "idempotency-key": "raw-status-001",
+        "x-nanda-agent": "agent:demo"
+      },
+      payload: bytes
+    });
+
+    expect(write.statusCode).toBe(200);
+    expect(write.json()).toMatchObject({
+      ok: true,
+      path: "/agents/demo/raw-status.json",
+      content_type: "application/json",
+      size_bytes: bytes.byteLength,
+      receipt: {
+        operation: "file.upsert",
+        efs: {
+          mirrors: [{ transport: "ipfs", uri: "ipfs://bafybeihackathon" }]
+        }
+      }
+    });
+    expect(ipfs.requests).toHaveLength(1);
+    expect(ipfs.requests[0]?.url).toContain("pin=true");
+
+    const read = await app.inject({
+      method: "GET",
+      url: "/v1/files?path=%2Fagents%2Fdemo%2Fraw-status.json"
+    });
+
+    expect(read.statusCode).toBe(200);
+    expect(read.body).toBe(bytes.toString("utf8"));
+    expect(read.headers["x-efs-scribe-receipt-id"]).toBe(write.json().receipt_id);
+    expect(read.headers["x-efs-payload-sha256"]).toBe(write.json().payload_sha256);
+    expect(read.headers["digest"]).toMatch(/^sha-256=/);
+    expect(ipfs.requests).toHaveLength(2);
+    expect(ipfs.requests[1]?.url).toBe("/ipfs/bafybeihackathon");
+
+    await app.close();
+    await ipfs.close();
+  });
+
+  it("returns idempotent raw byte write retries without re-pinning to IPFS", async () => {
+    const ipfs = await startFakeIpfs();
+    const app = await buildApp({
+      mode: "offline",
+      apiKeysJson: '{"local-scribe-key":"api-key:local-scribe-agent"}',
+      derivationSecret: "unit-test-secret",
+      publicBaseUrl: "http://localhost:3000",
+      logLevel: "silent",
+      ipfs: { apiUrl: ipfs.url }
+    });
+    const request = {
+      method: "PUT" as const,
+      url: "/v1/files?path=%2Fagents%2Fdemo%2Fraw-idempotent.json",
+      headers: {
+        authorization: "Bearer local-scribe-key",
+        "content-type": "application/json",
+        "idempotency-key": "raw-idempotent-001"
+      },
+      payload: Buffer.from('{"ok":true}', "utf8")
+    };
+
+    const first = await app.inject(request);
+    const retry = await app.inject(request);
+
+    expect(first.statusCode).toBe(200);
+    expect(retry.statusCode).toBe(200);
+    expect(retry.json().receipt).toEqual(first.json().receipt);
+    expect(ipfs.requests).toHaveLength(1);
+
+    await app.close();
+    await ipfs.close();
+  });
+
+  it("rejects raw byte idempotency key reuse with different bytes before re-pinning", async () => {
+    const ipfs = await startFakeIpfs();
+    const app = await buildApp({
+      mode: "offline",
+      apiKeysJson: '{"local-scribe-key":"api-key:local-scribe-agent"}',
+      derivationSecret: "unit-test-secret",
+      publicBaseUrl: "http://localhost:3000",
+      logLevel: "silent",
+      ipfs: { apiUrl: ipfs.url }
+    });
+    const baseRequest = {
+      method: "PUT" as const,
+      url: "/v1/files?path=%2Fagents%2Fdemo%2Fraw-conflict.json",
+      headers: {
+        authorization: "Bearer local-scribe-key",
+        "content-type": "application/json",
+        "idempotency-key": "raw-conflict-001"
+      }
+    };
+
+    const first = await app.inject({
+      ...baseRequest,
+      payload: Buffer.from('{"ok":true}', "utf8")
+    });
+    const conflict = await app.inject({
+      ...baseRequest,
+      payload: Buffer.from('{"ok":false}', "utf8")
+    });
+
+    expect(first.statusCode).toBe(200);
+    expect(conflict.statusCode).toBe(409);
+    expect(conflict.json()).toMatchObject({ error: "conflict" });
+    expect(ipfs.requests).toHaveLength(1);
+
+    await app.close();
+    await ipfs.close();
+  });
+
+  it("requires auth for raw byte writes before body validation", async () => {
+    const app = await buildApp({
+      mode: "offline",
+      apiKeysJson: '{"local-scribe-key":"api-key:local-scribe-agent"}',
+      derivationSecret: "unit-test-secret",
+      publicBaseUrl: "http://localhost:3000",
+      logLevel: "silent"
+    });
+
+    const response = await app.inject({
+      method: "PUT",
+      url: "/v1/files?path=%2Fagents%2Fdemo%2Fraw-status.json",
+      headers: { "content-type": "application/octet-stream" },
+      payload: Buffer.alloc(MAX_INLINE_CONTENT_BYTES + 1)
+    });
+
+    expect(response.statusCode).toBe(401);
+    expect(response.json()).toMatchObject({ error: "unauthorized" });
+
+    await app.close();
+  });
+
+  it("rejects oversized raw byte writes", async () => {
+    const app = await buildApp({
+      mode: "offline",
+      apiKeysJson: '{"local-scribe-key":"api-key:local-scribe-agent"}',
+      derivationSecret: "unit-test-secret",
+      publicBaseUrl: "http://localhost:3000",
+      logLevel: "silent"
+    });
+
+    const response = await app.inject({
+      method: "PUT",
+      url: "/v1/files?path=%2Fagents%2Fdemo%2Ftoo-large.bin",
+      headers: {
+        authorization: "Bearer local-scribe-key",
+        "content-type": "application/octet-stream"
+      },
+      payload: Buffer.alloc(MAX_INLINE_CONTENT_BYTES + 1)
+    });
+
+    expect(response.statusCode).toBe(413);
+    expect(response.json()).toMatchObject({ error: "payload_too_large" });
+
+    await app.close();
+  });
+
+  it("does not return bytes when the latest receipt has no IPFS mirror", async () => {
+    const app = await buildApp({
+      mode: "offline",
+      apiKeysJson: '{"local-scribe-key":"api-key:local-scribe-agent"}',
+      derivationSecret: "unit-test-secret",
+      publicBaseUrl: "http://localhost:3000",
+      logLevel: "silent"
+    });
+
+    const write = await app.inject({
+      method: "POST",
+      url: "/v1/files",
+      headers: { authorization: "Bearer local-scribe-key" },
+      payload: {
+        ...writeBody,
+        path: "/agents/demo/hash-only.json",
+        content: {
+          mode: "hash_only",
+          payload_sha256:
+            "sha256:43258cff783fe7036d8a43033f830adfc60ec037382473548ac742b888292777"
+        },
+        options: { idempotency_key: "hash-only-no-bytes-001" }
+      }
+    });
+    const read = await app.inject({
+      method: "GET",
+      url: "/v1/files?path=%2Fagents%2Fdemo%2Fhash-only.json"
+    });
+
+    expect(write.statusCode).toBe(200);
+    expect(read.statusCode).toBe(409);
+    expect(read.json()).toMatchObject({ error: "bytes_unavailable" });
+
+    await app.close();
+  });
+
+  it("does not return bytes after a file placement is removed", async () => {
+    const ipfs = await startFakeIpfs();
+    const app = await buildApp({
+      mode: "offline",
+      apiKeysJson: apiKeysWithDelete,
+      derivationSecret: "unit-test-secret",
+      publicBaseUrl: "http://localhost:3000",
+      logLevel: "silent",
+      ipfs: { apiUrl: ipfs.url, gatewayUrl: ipfs.gatewayUrl }
+    });
+
+    const write = await app.inject({
+      method: "PUT",
+      url: "/v1/files?path=%2Fagents%2Fdemo%2Fremoved.json",
+      headers: {
+        authorization: "Bearer local-scribe-key",
+        "content-type": "application/json",
+        "idempotency-key": "removed-write-001"
+      },
+      payload: Buffer.from('{"ok":true}', "utf8")
+    });
+    const remove = await app.inject({
+      method: "POST",
+      url: "/v1/files/delete",
+      headers: { authorization: "Bearer local-scribe-key" },
+      payload: {
+        path: "/agents/demo/removed.json",
+        options: { idempotency_key: "removed-delete-001" }
+      }
+    });
+    const read = await app.inject({
+      method: "GET",
+      url: "/v1/files?path=%2Fagents%2Fdemo%2Fremoved.json"
+    });
+
+    expect(write.statusCode).toBe(200);
+    expect(remove.statusCode).toBe(200);
+    expect(read.statusCode).toBe(404);
+
+    await app.close();
+    await ipfs.close();
+  });
+
+  it("does not return bytes when gateway content fails hash verification", async () => {
+    const ipfs = await startFakeIpfs({ gatewayBody: Buffer.from('{"ok":false}', "utf8") });
+    const app = await buildApp({
+      mode: "offline",
+      apiKeysJson: '{"local-scribe-key":"api-key:local-scribe-agent"}',
+      derivationSecret: "unit-test-secret",
+      publicBaseUrl: "http://localhost:3000",
+      logLevel: "silent",
+      ipfs: { apiUrl: ipfs.url, gatewayUrl: ipfs.gatewayUrl }
+    });
+
+    const write = await app.inject({
+      method: "PUT",
+      url: "/v1/files?path=%2Fagents%2Fdemo%2Fbad-gateway.json",
+      headers: {
+        authorization: "Bearer local-scribe-key",
+        "content-type": "application/json",
+        "idempotency-key": "bad-gateway-001"
+      },
+      payload: Buffer.from('{"ok":true}', "utf8")
+    });
+    const read = await app.inject({
+      method: "GET",
+      url: "/v1/files?path=%2Fagents%2Fdemo%2Fbad-gateway.json"
+    });
+
+    expect(write.statusCode).toBe(200);
+    expect(read.statusCode).toBe(502);
+    expect(read.json()).toMatchObject({ error: "integrity_mismatch" });
+
+    await app.close();
+    await ipfs.close();
+  });
+
+  it("reports missing IPFS gateway configuration for byte reads", async () => {
+    const app = await buildApp({
+      mode: "offline",
+      apiKeysJson: '{"local-scribe-key":"api-key:local-scribe-agent"}',
+      derivationSecret: "unit-test-secret",
+      publicBaseUrl: "http://localhost:3000",
+      logLevel: "silent"
+    });
+
+    const write = await app.inject({
+      method: "POST",
+      url: "/v1/files",
+      headers: { authorization: "Bearer local-scribe-key" },
+      payload: {
+        ...writeBody,
+        path: "/agents/demo/external-ipfs.json",
+        content: {
+          mode: "external_mirror_only",
+          payload_sha256:
+            "sha256:43258cff783fe7036d8a43033f830adfc60ec037382473548ac742b888292777",
+          content_type: "application/json"
+        },
+        mirrors: [{ transport: "ipfs", uri: "ipfs://bafybeihackathon" }],
+        options: { idempotency_key: "external-ipfs-no-gateway-001" }
+      }
+    });
+    const read = await app.inject({
+      method: "GET",
+      url: "/v1/files?path=%2Fagents%2Fdemo%2Fexternal-ipfs.json"
+    });
+
+    expect(write.statusCode).toBe(200);
+    expect(read.statusCode).toBe(502);
+    expect(read.json()).toMatchObject({ error: "ipfs_read_error" });
+
+    await app.close();
   });
 
   it("returns idempotent retries without re-pinning to IPFS", async () => {
@@ -1226,21 +1553,45 @@ class ConflictingSepoliaWriter extends OfflineEfsWriter {
 
 interface FakeIpfsServer {
   url: string;
-  requests: Array<{ url: string; bodyBytes: number; authorization?: string }>;
+  gatewayUrl: string;
+  requests: Array<{ method?: string; url: string; bodyBytes: number; authorization?: string }>;
   close: () => Promise<void>;
 }
 
 async function startFakeIpfs(
-  options: { failuresBeforeSuccess?: number; finalStatus?: number; finalBody?: string } = {}
+  options: {
+    failuresBeforeSuccess?: number;
+    finalStatus?: number;
+    finalBody?: string;
+    gatewayBody?: Buffer;
+    gatewayStatus?: number;
+  } = {}
 ): Promise<FakeIpfsServer> {
   const requests: FakeIpfsServer["requests"] = [];
   const server: Server = createServer((request, response) => {
+    if (request.method === "GET" && request.url === "/ipfs/bafybeihackathon") {
+      requests.push({
+        method: request.method,
+        url: request.url,
+        bodyBytes: 0,
+        authorization: request.headers.authorization
+      });
+      const status = options.gatewayStatus ?? 200;
+      response.writeHead(status, {
+        "content-type": "application/json",
+        "content-length": String((options.gatewayBody ?? Buffer.from('{"ok":true}', "utf8")).byteLength)
+      });
+      response.end(options.gatewayBody ?? Buffer.from('{"ok":true}', "utf8"));
+      return;
+    }
+
     let bodyBytes = 0;
     request.on("data", (chunk: Buffer) => {
       bodyBytes += chunk.byteLength;
     });
     request.on("end", () => {
       requests.push({
+        method: request.method,
         url: request.url ?? "",
         bodyBytes,
         authorization: request.headers.authorization
@@ -1267,6 +1618,7 @@ async function startFakeIpfs(
 
   return {
     url: `http://127.0.0.1:${address.port}/api/v0`,
+    gatewayUrl: `http://127.0.0.1:${address.port}/ipfs/`,
     requests,
     close: () =>
       new Promise<void>((resolve, reject) => {

@@ -21,13 +21,30 @@ import {
   type FileRemoveRequest,
   type FileWriteRequest,
   MAX_INLINE_CONTENT_BYTES,
+  type StorageStrategy,
   type WriterContext
 } from "../efs/writer.js";
 import { sha256Hex } from "../lib/hash.js";
-import { badRequest, conflict, forbidden, HttpError, notFound, rateLimited } from "../lib/errors.js";
+import {
+  badGateway,
+  badRequest,
+  bytesUnavailable,
+  conflict,
+  forbidden,
+  HttpError,
+  notFound,
+  payloadTooLarge,
+  rateLimited
+} from "../lib/errors.js";
 import { InMemoryReceiptRepository } from "../receipts/repository.js";
 import { ReceiptSchema, type EfsScribeReceipt } from "../receipts/schema.js";
-import { addToIpfs, assertValidIpfsApiUrl, IpfsPinningError } from "../storage/ipfs.js";
+import {
+  addToIpfs,
+  assertValidIpfsApiUrl,
+  IpfsPinningError,
+  IpfsReadError,
+  readFromIpfs
+} from "../storage/ipfs.js";
 
 const IPFS_UPLOAD_RATE_LIMIT_CAPACITY = 10;
 const IPFS_UPLOAD_RATE_LIMIT_REFILL_TOKENS = 5;
@@ -41,6 +58,11 @@ const ResolveQuerySchema = z.object({
   path: z.string().min(1),
   attester: z.string().regex(/^0x[0-9a-fA-F]{40}$/).optional()
 });
+const ByteReadQuerySchema = ResolveQuerySchema;
+const ByteWriteQuerySchema = z.object({
+  path: z.string().min(1)
+});
+const ByteStorageHeaderSchema = z.enum(["auto", "ipfs", "metadata_only"]);
 
 const VerifyReceiptBodySchema = z.object({
   receipt: ReceiptSchema
@@ -83,6 +105,11 @@ export async function registerRoutes(
   });
 
   app.setErrorHandler((error, _request, reply) => {
+    const statusCode = (error as { statusCode?: unknown }).statusCode;
+    if (statusCode === 413) {
+      void reply.status(413).send({ error: "payload_too_large", message: "Request body is too large" });
+      return;
+    }
     if (error instanceof HttpError) {
       void reply.status(error.statusCode).send({ error: error.code, message: error.message });
       return;
@@ -111,6 +138,10 @@ export async function registerRoutes(
       void reply.status(503).send({ error: "ipfs_pin_error", message: error.message });
       return;
     }
+    if (error instanceof IpfsReadError) {
+      void reply.status(502).send({ error: "ipfs_read_error", message: error.message });
+      return;
+    }
     void reply.status(500).send({ error: "internal_error", message: "Unexpected service error" });
   });
 
@@ -123,13 +154,15 @@ export async function registerRoutes(
   app.get("/", async () => ({
     service: "efs-scribe",
     mode: config.mode,
-    summary: "Agent-friendly EFS file write receipts and write-plan previews.",
+    summary: "Agent-friendly EFS file bytes, receipts, and write-plan previews.",
     links: {
       health: "/health",
       skill: "/skill.md",
       skill_canonical: "/SKILL.md",
       openapi: "/openapi.json",
       capabilities: "/v1/capabilities",
+      read_file_bytes: "/v1/files?path=/agents/demo/status.json",
+      write_file_bytes: "/v1/files?path=/agents/demo/status.json",
       plan_file: "/v1/files/plan",
       write_file: "/v1/files",
       delete_file: "/v1/files/delete",
@@ -161,8 +194,9 @@ export async function registerRoutes(
       "/v1/capabilities": { get: { summary: "Service capabilities" } },
       "/v1/files/plan": {
         post: {
+          operationId: "planFileRecord",
           summary: "Preview an EFS file write plan",
-          security: [{ bearerAuth: [] }],
+          security: [{ bearerAuth: [] }, { apiKeyAuth: [] }],
           requestBody: {
             required: true,
             content: {
@@ -174,9 +208,90 @@ export async function registerRoutes(
         }
       },
       "/v1/files": {
+        get: {
+          operationId: "readFileBytes",
+          summary: "Read file bytes by EFS path",
+          parameters: [
+            {
+              name: "path",
+              in: "query",
+              required: true,
+              schema: { type: "string", example: "/agents/demo/status.json" }
+            },
+            {
+              name: "attester",
+              in: "query",
+              required: false,
+              schema: { type: "string", pattern: "^0x[0-9a-fA-F]{40}$" }
+            }
+          ],
+          responses: {
+            "200": {
+              description: "Verified file bytes fetched from an EFS mirror",
+              content: {
+                "application/octet-stream": {
+                  schema: { type: "string", format: "binary" }
+                }
+              }
+            }
+          }
+        },
+        put: {
+          operationId: "writeFileBytes",
+          summary: "Write raw file bytes to an EFS path",
+          security: [{ bearerAuth: [] }, { apiKeyAuth: [] }],
+          parameters: [
+            {
+              name: "path",
+              in: "query",
+              required: true,
+              schema: { type: "string", example: "/agents/demo/status.json" }
+            },
+            {
+              name: "Idempotency-Key",
+              in: "header",
+              required: false,
+              schema: { type: "string", maxLength: 128 }
+            },
+            {
+              name: "X-EFS-Storage",
+              in: "header",
+              required: false,
+              schema: { type: "string", enum: ["auto", "ipfs", "metadata_only"], default: "ipfs" }
+            },
+            {
+              name: "X-Nanda-Agent",
+              in: "header",
+              required: false,
+              schema: { type: "string", example: "agent:demo" }
+            }
+          ],
+          requestBody: {
+            required: true,
+            content: {
+              "application/octet-stream": {
+                schema: { type: "string", format: "binary" }
+              },
+              "application/json": {
+                schema: { type: "string", format: "binary" }
+              }
+            }
+          },
+          responses: {
+            "200": {
+              description: "Receipt for the EFS byte write",
+              content: {
+                "application/json": {
+                  schema: { $ref: "#/components/schemas/ByteWriteResponse" }
+                }
+              }
+            }
+          }
+        },
         post: {
+          operationId: "writeFileRecord",
           summary: "Write an EFS file record",
-          security: [{ bearerAuth: [] }],
+          security: [{ bearerAuth: [] }, { apiKeyAuth: [] }],
           requestBody: {
             required: true,
             content: {
@@ -199,10 +314,11 @@ export async function registerRoutes(
       },
       "/v1/files/delete": {
         post: {
+          operationId: "deleteFilePlacement",
           summary: "Remove an EFS file placement from the authenticated agent lens",
           description:
             "Revokes the authenticated agent's active placement PIN for a file path. Chain history, anchors, DATA, mirrors, and IPFS pins are not erased.",
-          security: [{ bearerAuth: [] }],
+          security: [{ bearerAuth: [] }, { apiKeyAuth: [] }],
           requestBody: {
             required: true,
             content: {
@@ -223,10 +339,11 @@ export async function registerRoutes(
           }
         }
       },
-      "/v1/receipts/{receiptId}": { get: { summary: "Fetch a stored receipt" } },
-      "/v1/resolve": { get: { summary: "Resolve the latest stored receipt by path" } },
+      "/v1/receipts/{receiptId}": { get: { operationId: "getReceipt", summary: "Fetch a stored receipt" } },
+      "/v1/resolve": { get: { operationId: "resolveFileReceipt", summary: "Resolve the latest stored receipt by path" } },
       "/v1/verify": {
         post: {
+          operationId: "verifyReceipt",
           summary: "Verify an EFS Scribe receipt",
           description:
             "Checks receipt shape and self-consistency. This is not an independent Sepolia indexer.",
@@ -243,7 +360,8 @@ export async function registerRoutes(
     },
     components: {
       securitySchemes: {
-        bearerAuth: { type: "http", scheme: "bearer" }
+        bearerAuth: { type: "http", scheme: "bearer" },
+        apiKeyAuth: { type: "apiKey", in: "header", name: "x-api-key" }
       },
       schemas: {
         InlineContent: {
@@ -338,6 +456,32 @@ export async function registerRoutes(
             links: { type: "object", additionalProperties: { type: "string" } }
           }
         },
+        ByteWriteResponse: {
+          type: "object",
+          required: [
+            "ok",
+            "path",
+            "content_type",
+            "size_bytes",
+            "payload_sha256",
+            "receipt_id",
+            "receipt",
+            "links"
+          ],
+          properties: {
+            ok: { type: "boolean", const: true },
+            path: { type: "string", example: "/agents/demo/status.json" },
+            content_type: { type: "string", example: "application/json" },
+            size_bytes: { type: "integer", minimum: 0 },
+            payload_sha256: {
+              type: "string",
+              example: "sha256:2689367b205c16ce32b480e6f8ebbb8a9f044d455c6ddfb140bfd6a500933602"
+            },
+            receipt_id: { type: "string", example: "rcpt_abc123" },
+            receipt: { type: "object", description: "EFS Scribe receipt object" },
+            links: { type: "object", additionalProperties: { type: "string" } }
+          }
+        },
         FileRemoveRequest: {
           type: "object",
           required: ["path"],
@@ -384,12 +528,19 @@ export async function registerRoutes(
       agent_funding_target_wei: config.sepolia.agentFundingTargetWei.toString()
     },
     content_modes: ["inline_base64", "hash_only", "external_mirror_only"],
+    byte_api: {
+      write: "PUT /v1/files?path=<absolute-path>",
+      read: "GET /v1/files?path=<absolute-path>",
+      write_default_storage: "ipfs",
+      read_verifies_payload_sha256: true
+    },
     inline_content_limit_bytes: MAX_INLINE_CONTENT_BYTES,
     storage: {
       strategies: ["auto", "ipfs", "metadata_only"],
       default_for_inline_base64: config.ipfs.apiUrl === undefined ? "metadata_only" : "ipfs",
       ipfs: {
         configured: config.ipfs.apiUrl !== undefined,
+        gateway_configured: config.ipfs.gatewayUrl !== undefined || config.ipfs.apiUrl !== undefined,
         mirror_transport: "ipfs",
         plan_previews_pin: false,
         rate_limit: {
@@ -418,12 +569,107 @@ export async function registerRoutes(
       "/SKILL.md",
       "/openapi.json",
       "/v1/capabilities",
+      "GET /v1/files?path=<absolute-path>",
       "/v1/receipts/:receiptId",
       "/v1/resolve",
       "/v1/verify"
     ],
-    authenticated_endpoints: ["/v1/files/plan", "/v1/files", "/v1/files/delete"]
+    authenticated_endpoints: [
+      "PUT /v1/files?path=<absolute-path>",
+      "/v1/files/plan",
+      "/v1/files",
+      "/v1/files/delete"
+    ]
   }));
+
+  await app.register(async (rawApp: FastifyInstance) => {
+    const rawBodyParser = (
+      _request: FastifyRequest,
+      body: Buffer,
+      done: (error: Error | null, body?: Buffer) => void
+    ) => {
+      done(null, body);
+    };
+    rawApp.removeContentTypeParser("application/json");
+    rawApp.addContentTypeParser("application/json", {
+      parseAs: "buffer",
+      bodyLimit: MAX_INLINE_CONTENT_BYTES
+    }, rawBodyParser);
+    rawApp.addContentTypeParser("*", {
+      parseAs: "buffer",
+      bodyLimit: MAX_INLINE_CONTENT_BYTES
+    }, rawBodyParser);
+
+    rawApp.put("/v1/files", { bodyLimit: MAX_INLINE_CONTENT_BYTES }, async (request, reply) => {
+      const query = ByteWriteQuerySchema.parse(request.query);
+      const bytes = requestBodyBuffer(request.body);
+      const contentType = requestContentType(request);
+      const parsed = rawBytesWriteRequest({
+        bytes,
+        contentType,
+        idempotencyKey: singleHeader(request.headers["idempotency-key"]),
+        path: query.path,
+        claimedNandaId: singleHeader(request.headers["x-nanda-agent"]),
+        storage: parseStorageHeader(singleHeader(request.headers["x-efs-storage"]))
+      });
+      const context = writerContext(request, parsed, apiKeys, config);
+      const submission = await writeWithOptionalIdempotency({
+        parsed,
+        config,
+        receipts,
+        pendingIdempotentSubmissions,
+        writer,
+        context,
+        writeRateLimiter,
+        ipfsRateLimiter,
+        ipfsAddSemaphore
+      });
+      return sendByteWriteSubmission(reply, submission, {
+        path: parsed.path,
+        contentType,
+        sizeBytes: bytes.byteLength,
+        payloadSha256: sha256Hex(bytes),
+        publicBaseUrl: config.publicBaseUrl
+      });
+    });
+  });
+
+  app.get("/v1/files", async (request: FastifyRequest, reply: FastifyReply) => {
+    const query = ByteReadQuerySchema.parse(request.query);
+    const path = normalizeEfsPath(query.path).canonicalPath;
+    const receipt = await receipts.getLatestByPath(path, query.attester);
+    if (receipt === undefined || receipt.operation === "file.remove") {
+      throw notFound("No readable file receipt found for path");
+    }
+    if (receipt.status !== "confirmed") {
+      throw bytesUnavailable("Latest file receipt is not confirmed");
+    }
+    const mirror = receipt.efs.mirrors.find(
+      (candidate) => candidate.transport === "ipfs" && candidate.uri.startsWith("ipfs://")
+    );
+    if (mirror === undefined) {
+      throw bytesUnavailable("Latest file receipt does not declare a retrievable IPFS mirror");
+    }
+
+    const fetched = await readFromIpfs(config.ipfs, {
+      uri: mirror.uri,
+      maxBytes: MAX_INLINE_CONTENT_BYTES
+    });
+    const actualHash = sha256Hex(fetched.bytes);
+    if (actualHash !== receipt.integrity.payload_sha256) {
+      throw badGateway("integrity_mismatch", "Fetched bytes did not match the EFS payload hash");
+    }
+
+    return reply
+      .type(fetched.contentType ?? "application/octet-stream")
+      .header("content-length", String(fetched.bytes.byteLength))
+      .header("etag", `"${receipt.integrity.payload_sha256}"`)
+      .header("digest", digestHeader(receipt.integrity.payload_sha256))
+      .header("x-efs-payload-sha256", receipt.integrity.payload_sha256)
+      .header("x-efs-scribe-receipt-id", receipt.receipt_id)
+      .header("x-efs-mirror-uri", mirror.uri)
+      .send(fetched.bytes);
+  });
 
   app.post("/v1/files/plan", async (request: FastifyRequest) => {
     const parsed = FileWriteRequestSchema.parse(request.body);
@@ -586,6 +832,82 @@ async function prepareFileWriteRequest(
   });
 }
 
+function rawBytesWriteRequest(input: {
+  bytes: Buffer;
+  contentType: string;
+  idempotencyKey?: string;
+  path: string;
+  claimedNandaId?: string;
+  storage: StorageStrategy;
+}): FileWriteRequest {
+  if (input.bytes.byteLength === 0) {
+    throw badRequest("Byte write body must not be empty");
+  }
+  if (input.bytes.byteLength > MAX_INLINE_CONTENT_BYTES) {
+    throw payloadTooLarge(`Byte write body must be ${MAX_INLINE_CONTENT_BYTES} bytes or less`);
+  }
+  return FileWriteRequestSchema.parse({
+    path: input.path,
+    content: {
+      mode: "inline_base64",
+      content_base64: input.bytes.toString("base64"),
+      content_type: input.contentType
+    },
+    mirrors: [],
+    properties: { name: filenameFromPath(input.path) },
+    agent: input.claimedNandaId === undefined ? {} : { claimed_nanda_id: input.claimedNandaId },
+    options: {
+      idempotency_key: input.idempotencyKey,
+      storage: input.storage
+    }
+  });
+}
+
+function requestBodyBuffer(body: unknown): Buffer {
+  if (Buffer.isBuffer(body)) {
+    return body;
+  }
+  if (body instanceof Uint8Array) {
+    return Buffer.from(body);
+  }
+  if (typeof body === "string") {
+    return Buffer.from(body, "utf8");
+  }
+  if (body === undefined || body === null) {
+    return Buffer.alloc(0);
+  }
+  throw badRequest("Byte write body must be raw bytes");
+}
+
+function requestContentType(request: FastifyRequest): string {
+  const value = singleHeader(request.headers["content-type"]) ?? "application/octet-stream";
+  if (value.length > 128) {
+    throw badRequest("content-type header must be 128 characters or less");
+  }
+  return value;
+}
+
+function singleHeader(value: string | string[] | undefined): string | undefined {
+  const raw = Array.isArray(value) ? value[0] : value;
+  const trimmed = raw?.trim();
+  return trimmed === undefined || trimmed.length === 0 ? undefined : trimmed;
+}
+
+function parseStorageHeader(value: string | undefined): StorageStrategy {
+  if (value === undefined) {
+    return "ipfs";
+  }
+  const parsed = ByteStorageHeaderSchema.safeParse(value);
+  if (!parsed.success) {
+    throw badRequest("x-efs-storage must be auto, ipfs, or metadata_only");
+  }
+  return parsed.data;
+}
+
+function digestHeader(payloadSha256: `sha256:${string}`): string {
+  return `sha-256=${Buffer.from(payloadSha256.slice("sha256:".length), "hex").toString("base64")}`;
+}
+
 function appendMirror(
   mirrors: FileWriteRequest["mirrors"],
   mirror: FileWriteRequest["mirrors"][number]
@@ -602,11 +924,14 @@ function filenameFromPath(path: string): string {
 }
 
 function isAuthenticatedWriteRoute(method: string, url: string): boolean {
-  if (method !== "POST") {
-    return false;
-  }
   const path = url.split("?")[0];
-  return path === "/v1/files" || path === "/v1/files/plan" || path === "/v1/files/delete";
+  if (method === "PUT") {
+    return path === "/v1/files";
+  }
+  if (method === "POST") {
+    return path === "/v1/files" || path === "/v1/files/plan" || path === "/v1/files/delete";
+  }
+  return false;
 }
 
 class TokenBucketRateLimiter {
@@ -932,6 +1257,38 @@ function sendSubmission(reply: FastifyReply, submission: SubmissionResult) {
   return {
     receipt: submission.receipt,
     links: submission.receipt.links
+  };
+}
+
+function sendByteWriteSubmission(
+  reply: FastifyReply,
+  submission: SubmissionResult,
+  input: {
+    path: string;
+    contentType: string;
+    sizeBytes: number;
+    payloadSha256: `sha256:${string}`;
+    publicBaseUrl: string;
+  }
+) {
+  if (submission.error !== undefined || submission.receipt.status === "failed") {
+    return sendSubmission(reply, submission);
+  }
+  const receipt = submission.receipt;
+  return {
+    ok: true,
+    path: input.path,
+    content_type: input.contentType,
+    size_bytes: input.sizeBytes,
+    payload_sha256: input.payloadSha256,
+    receipt_id: receipt.receipt_id,
+    receipt,
+    links: {
+      read: `${input.publicBaseUrl}/v1/files?path=${encodeURIComponent(input.path)}`,
+      resolve: `${input.publicBaseUrl}/v1/resolve?path=${encodeURIComponent(input.path)}`,
+      receipt: `${input.publicBaseUrl}/v1/receipts/${encodeURIComponent(receipt.receipt_id)}`,
+      verify: `${input.publicBaseUrl}/v1/verify`
+    }
   };
 }
 
