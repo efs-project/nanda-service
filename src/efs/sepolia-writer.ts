@@ -1,6 +1,7 @@
 import {
   createPublicClient,
   createWalletClient,
+  fallback,
   http,
   type Account,
   type Log
@@ -46,6 +47,7 @@ interface SepoliaTransactionReceipt {
 }
 
 const ZERO_UID = `0x${"0".repeat(64)}` as const;
+const DEFAULT_SEPOLIA_RPC_FALLBACK_URLS = ["https://ethereum-sepolia-rpc.publicnode.com"];
 
 export interface SepoliaPublicClient extends SepoliaReadClient {
   getBalance(args: { address: Hex }): Promise<bigint>;
@@ -637,9 +639,10 @@ export function createSepoliaEfsWriter(config: AppConfig): SepoliaEfsWriter {
     throw new Error("Sepolia writer requires EFS_CHAIN_ID=11155111");
   }
 
+  const transport = sepoliaRpcTransport(rpcUrl);
   const publicClient = createPublicClient({
     chain: sepolia,
-    transport: http(rpcUrl)
+    transport
   }) as SepoliaPublicClient;
   const sponsorAccount =
     sponsorPrivateKey === undefined ? undefined : privateKeyToAccount(sponsorPrivateKey);
@@ -649,7 +652,7 @@ export function createSepoliaEfsWriter(config: AppConfig): SepoliaEfsWriter {
       : (createWalletClient({
           account: sponsorAccount,
           chain: sepolia,
-          transport: http(rpcUrl)
+          transport
         }) as SepoliaWalletClient);
 
   return new SepoliaEfsWriter({
@@ -665,10 +668,20 @@ export function createSepoliaEfsWriter(config: AppConfig): SepoliaEfsWriter {
       return createWalletClient({
         account,
         chain: sepolia,
-        transport: http(rpcUrl)
+        transport
       }) as SepoliaWalletClient;
     }
   });
+}
+
+function sepoliaRpcTransport(primaryRpcUrl: string) {
+  const urls = [primaryRpcUrl, ...DEFAULT_SEPOLIA_RPC_FALLBACK_URLS].filter(
+    (url, index, all) => all.indexOf(url) === index
+  );
+  if (urls.length === 1) {
+    return http(urls[0]);
+  }
+  return fallback(urls.map((url) => http(url)));
 }
 
 function uniqueLayers(plan: EfsWritePlan): number[] {
