@@ -4,7 +4,8 @@ import {
   encodeAnchorData,
   encodeMirrorData,
   encodePinData,
-  encodePropertyData
+  encodePropertyData,
+  encodeTagData
 } from "./schema-encoding.js";
 import type {
   EfsWritePlan,
@@ -114,7 +115,8 @@ export function buildFileWritePlan(
       ...anchorAttestations(normalizedPath),
       ...propertyAttestations(properties),
       ...mirrorAttestations(parsed),
-      placementPin(normalizedPath)
+      placementPin(normalizedPath),
+      ...visibilityTagAttestations(normalizedPath)
     ].sort((left, right) => left.layer - right.layer || left.ref.localeCompare(right.ref))
   };
 }
@@ -252,6 +254,25 @@ function placementPin(path: NormalizedEfsPath): PlannedAttestation {
     refUID: { ref: "data" },
     fields
   };
+}
+
+function visibilityTagAttestations(path: NormalizedEfsPath): PlannedAttestation[] {
+  const folderAnchors = path.anchors.slice(0, -1);
+  return folderAnchors.map((anchor) => {
+    const fields = {
+      definition: EFS_SCHEMA_UIDS.DATA,
+      weight: "1"
+    };
+    return {
+      ref: `visibility.tag:${anchor.path}`,
+      layer: path.anchors.length + 1,
+      schema: EFS_SCHEMA_UIDS.TAG,
+      data: encodeTagData(EFS_SCHEMA_UIDS.DATA, 1n),
+      revocable: true,
+      refUID: { ref: `anchor:${anchor.path}` },
+      fields
+    };
+  });
 }
 
 function normalizedProperties(

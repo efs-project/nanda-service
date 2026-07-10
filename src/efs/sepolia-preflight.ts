@@ -1,4 +1,4 @@
-import { EFS_SEPOLIA } from "../config/chains.js";
+import { EFS_SCHEMA_UIDS, EFS_SEPOLIA } from "../config/chains.js";
 import type { EfsWritePlan, Hex, PlannedAttestation, PreflightRequirement, Uid } from "./writer.js";
 
 const ZERO_UID = `0x${"0".repeat(64)}` as const;
@@ -34,30 +34,50 @@ export const EFS_INDEXER_ABI = [
   }
 ] as const;
 
+export const EFS_EDGE_RESOLVER_ABI = [
+  {
+    type: "function",
+    name: "hasActiveTagFromAny",
+    stateMutability: "view",
+    inputs: [
+      { name: "targetID", type: "bytes32" },
+      { name: "definition", type: "bytes32" },
+      { name: "attesters", type: "address[]" }
+    ],
+    outputs: [{ name: "", type: "bool" }]
+  }
+] as const;
+
 export interface SepoliaReadClient {
-  readContract(args:
-    | {
-        address?: Hex;
-        abi?: typeof EFS_INDEXER_ABI;
-        functionName: "rootAnchorUID";
-      }
-    | {
-        address?: Hex;
-        abi?: typeof EFS_INDEXER_ABI;
-        functionName: "resolvePath";
-        args: readonly [Uid, string];
-      }
-    | {
-        address?: Hex;
-        abi?: typeof EFS_INDEXER_ABI;
-        functionName: "resolveAnchor";
-        args: readonly [Uid, string, Uid];
-      }): Promise<Uid>;
+  readContract(args: {
+    address?: Hex;
+    abi?: typeof EFS_INDEXER_ABI;
+    functionName: "rootAnchorUID";
+  }): Promise<Uid>;
+  readContract(args: {
+    address?: Hex;
+    abi?: typeof EFS_INDEXER_ABI;
+    functionName: "resolvePath";
+    args: readonly [Uid, string];
+  }): Promise<Uid>;
+  readContract(args: {
+    address?: Hex;
+    abi?: typeof EFS_INDEXER_ABI;
+    functionName: "resolveAnchor";
+    args: readonly [Uid, string, Uid];
+  }): Promise<Uid>;
+  readContract(args: {
+    address?: Hex;
+    abi?: typeof EFS_EDGE_RESOLVER_ABI;
+    functionName: "hasActiveTagFromAny";
+    args: readonly [Uid, Uid, readonly Hex[]];
+  }): Promise<boolean>;
 }
 
 export interface SepoliaPreflightOptions {
   publicClient: SepoliaReadClient;
   indexerAddress?: Hex;
+  edgeResolverAddress?: Hex;
 }
 
 export interface PathAnchorPreflight {
@@ -85,6 +105,7 @@ export interface SepoliaPreflightResult {
   pathAnchors: PathAnchorPreflight[];
   missingPathAnchors: PathAnchorPreflight[];
   transportAnchors: TransportAnchorPreflight[];
+  activeVisibilityTagRefs: string[];
 }
 
 export class SepoliaPreflightError extends Error {
@@ -99,6 +120,7 @@ export async function resolveSepoliaPreflight(
   options: SepoliaPreflightOptions
 ): Promise<SepoliaPreflightResult> {
   const indexerAddress = options.indexerAddress ?? EFS_SEPOLIA.indexer;
+  const edgeResolverAddress = options.edgeResolverAddress ?? EFS_SEPOLIA.edgeResolver;
   const rootAnchorUid = await options.publicClient.readContract({
     address: indexerAddress,
     abi: EFS_INDEXER_ABI,
@@ -123,6 +145,12 @@ export async function resolveSepoliaPreflight(
     rootAnchorUid,
     resolvedRefs
   );
+  const activeVisibilityTagRefs = await resolveActiveVisibilityTags(
+    plan,
+    options.publicClient,
+    edgeResolverAddress,
+    pathAnchors
+  );
 
   return {
     resolvedRefs,
@@ -130,7 +158,8 @@ export async function resolveSepoliaPreflight(
     transportsAnchorUid: transportAnchors.length === 0 ? undefined : resolvedRefs.get("efs.path./transports"),
     pathAnchors,
     missingPathAnchors: pathAnchors.filter((anchor) => !anchor.exists),
-    transportAnchors
+    transportAnchors,
+    activeVisibilityTagRefs
   };
 }
 
@@ -253,6 +282,46 @@ async function resolveTransportAnchors(
   return resolved;
 }
 
+async function resolveActiveVisibilityTags(
+  plan: EfsWritePlan,
+  publicClient: SepoliaReadClient,
+  edgeResolverAddress: Hex,
+  pathAnchors: PathAnchorPreflight[]
+): Promise<string[]> {
+  const pathAnchorUids = new Map(
+    pathAnchors
+      .filter((anchor): anchor is PathAnchorPreflight & { uid: Uid } => anchor.uid !== undefined)
+      .map((anchor) => [anchor.plannedRef, anchor.uid])
+  );
+  const active: string[] = [];
+
+  for (const attestation of plan.layers) {
+    if (attestation.schema !== EFS_SCHEMA_UIDS.TAG) {
+      continue;
+    }
+    const targetRef = refKey(attestation.refUID);
+    if (targetRef === undefined) {
+      continue;
+    }
+    const targetUid = pathAnchorUids.get(targetRef);
+    if (targetUid === undefined) {
+      continue;
+    }
+    const definition = fieldUid(attestation, "definition");
+    const alreadyActive = await publicClient.readContract({
+      address: edgeResolverAddress,
+      abi: EFS_EDGE_RESOLVER_ABI,
+      functionName: "hasActiveTagFromAny",
+      args: [targetUid, definition, [plan.attester]]
+    });
+    if (alreadyActive) {
+      active.push(attestation.ref);
+    }
+  }
+
+  return active;
+}
+
 function uniqueTransports(requirements: PreflightRequirement[]): string[] {
   return [
     ...new Set(
@@ -278,6 +347,13 @@ function fieldUid(attestation: PlannedAttestation, field: string): Uid {
     throw new SepoliaPreflightError(`${attestation.ref} missing bytes32 field ${field}`);
   }
   return value as Uid;
+}
+
+function refKey(ref: PlannedAttestation["refUID"]): string | undefined {
+  if (typeof ref === "object" && "ref" in ref) {
+    return ref.ref;
+  }
+  return undefined;
 }
 
 function mustPath(requirement: PreflightRequirement): string {

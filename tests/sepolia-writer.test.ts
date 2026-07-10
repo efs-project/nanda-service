@@ -82,7 +82,13 @@ describe("SepoliaEfsWriter", () => {
     expect(agentWallet.contractWrites.every((write) => write.account?.address === context.attester.address)).toBe(
       true
     );
-    expect(agentWallet.contractWrites.map((write) => attestationCount(write))).toEqual([5, 5, 5, 1]);
+    expect(agentWallet.contractWrites.map((write) => attestationCount(write))).toEqual([
+      5,
+      5,
+      5,
+      1,
+      2
+    ]);
     expect(receipt).toMatchObject({
       status: "confirmed",
       mode: "sepolia",
@@ -98,8 +104,8 @@ describe("SepoliaEfsWriter", () => {
         path: "/agents/demo/status.json"
       }
     });
-    expect(receipt.efs.tx_hashes).toHaveLength(4);
-    expect(receipt.efs.block_numbers).toEqual([101, 102, 103, 104]);
+    expect(receipt.efs.tx_hashes).toHaveLength(5);
+    expect(receipt.efs.block_numbers).toEqual([101, 102, 103, 104, 105]);
     expect(receipt.efs.uids.data).toMatch(/^0x[0-9a-f]{64}$/);
     expect(receipt.efs.uids.file_anchor).toMatch(/^0x[0-9a-f]{64}$/);
     expect(receipt.efs.uids.placement_pin).toMatch(/^0x[0-9a-f]{64}$/);
@@ -150,7 +156,13 @@ describe("SepoliaEfsWriter", () => {
       context
     );
 
-    expect(agentWallet.contractWrites.map((write) => attestationCount(write))).toEqual([2, 1, 1, 1]);
+    expect(agentWallet.contractWrites.map((write) => attestationCount(write))).toEqual([
+      2,
+      1,
+      1,
+      1,
+      2
+    ]);
     expect(receipt.efs.uids.file_anchor).toBe(fileAnchor);
     expect(receipt.efs.uids.placement_pin).toMatch(/^0x[0-9a-f]{64}$/);
   });
@@ -308,12 +320,22 @@ class FakeSepoliaPublicClient {
     private readonly paths: Record<string, Uid>
   ) {}
 
+  async readContract(args: { functionName: "rootAnchorUID"; args?: readonly unknown[] }): Promise<Uid>;
+  async readContract(args: { functionName: "resolvePath"; args?: readonly unknown[] }): Promise<Uid>;
+  async readContract(args: { functionName: "resolveAnchor"; args?: readonly unknown[] }): Promise<Uid>;
   async readContract(args: {
-    functionName: "rootAnchorUID" | "resolvePath" | "resolveAnchor";
+    functionName: "hasActiveTagFromAny";
     args?: readonly unknown[];
-  }): Promise<Uid> {
+  }): Promise<boolean>;
+  async readContract(args: {
+    functionName: "rootAnchorUID" | "resolvePath" | "resolveAnchor" | "hasActiveTagFromAny";
+    args?: readonly unknown[];
+  }): Promise<Uid | boolean> {
     if (args.functionName === "rootAnchorUID") {
       return this.root;
+    }
+    if (args.functionName === "hasActiveTagFromAny") {
+      return false;
     }
     if (args.functionName === "resolveAnchor") {
       const [parent, name, forSchema] = args.args ?? [];

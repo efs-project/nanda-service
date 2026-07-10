@@ -7,7 +7,8 @@ import {
   encodeMirrorData,
   encodePinData,
   encodePlannedAttestationData,
-  encodePropertyData
+  encodePropertyData,
+  encodeTagData
 } from "../src/efs/schema-encoding.js";
 
 describe("EFS schema encoding", () => {
@@ -27,6 +28,7 @@ describe("EFS schema encoding", () => {
     const property = encodePropertyData("sha256:abc");
     const pin = encodePinData(EFS_SCHEMA_UIDS.DATA);
     const mirror = encodeMirrorData(EFS_SCHEMA_UIDS.MIRROR, "https://example.com/status.json");
+    const tag = encodeTagData(EFS_SCHEMA_UIDS.DATA, 1n);
 
     expect(decodeAbiParameters(parseAbiParameters("string value"), property)[0]).toBe(
       "sha256:abc"
@@ -40,6 +42,10 @@ describe("EFS schema encoding", () => {
         mirror
       )
     ).toEqual([EFS_SCHEMA_UIDS.MIRROR, "https://example.com/status.json"]);
+    expect(decodeAbiParameters(parseAbiParameters("bytes32 definition, int256 weight"), tag)).toEqual([
+      EFS_SCHEMA_UIDS.DATA,
+      1n
+    ]);
   });
 
   it("requires symbolic refs to be resolved unless placeholders are explicit", () => {

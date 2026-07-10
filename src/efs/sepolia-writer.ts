@@ -121,7 +121,8 @@ export class SepoliaEfsWriter implements EfsWriter {
 
     const preflight = await resolveSepoliaPreflight(plan, {
       publicClient: this.publicClient,
-      indexerAddress: this.indexerAddress
+      indexerAddress: this.indexerAddress,
+      edgeResolverAddress: EFS_SEPOLIA.edgeResolver
     });
     const refs = new Map<string, Uid>(preflight.resolvedRefs);
     const skipRefs = new Set<string>();
@@ -130,6 +131,9 @@ export class SepoliaEfsWriter implements EfsWriter {
         refs.set(anchor.plannedRef, anchor.uid);
         skipRefs.add(anchor.plannedRef);
       }
+    }
+    for (const ref of preflight.activeVisibilityTagRefs) {
+      skipRefs.add(ref);
     }
 
     const agentAccount = privateKeyToAccount(context.attester.privateKey);

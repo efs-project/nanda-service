@@ -31,6 +31,13 @@ export function encodeMirrorData(transportDefinition: Uid, uri: string): Hex {
   ]);
 }
 
+export function encodeTagData(definition: Uid, weight: bigint): Hex {
+  return encodeAbiParameters(parseAbiParameters("bytes32 definition, int256 weight"), [
+    definition,
+    weight
+  ]);
+}
+
 export function encodePlannedAttestationData(
   attestation: PlannedAttestation,
   refs: Map<string, Uid> = new Map(),
@@ -55,6 +62,12 @@ export function encodePlannedAttestationData(
     return encodeMirrorData(
       fieldUid(attestation, "transportDefinition", refs, options),
       fieldString(attestation, "uri")
+    );
+  }
+  if (attestation.schema === EFS_SCHEMA_UIDS.TAG) {
+    return encodeTagData(
+      fieldUid(attestation, "definition", refs, options),
+      fieldBigInt(attestation, "weight")
     );
   }
   return attestation.data;
@@ -99,6 +112,20 @@ function fieldUid(
     return value as Uid;
   }
   throw new Error(`${attestation.ref} missing bytes32 field ${name}`);
+}
+
+function fieldBigInt(attestation: PlannedAttestation, name: string): bigint {
+  const value = attestation.fields?.[name];
+  if (typeof value === "bigint") {
+    return value;
+  }
+  if (typeof value === "number" && Number.isInteger(value)) {
+    return BigInt(value);
+  }
+  if (typeof value === "string" && /^-?\d+$/.test(value)) {
+    return BigInt(value);
+  }
+  throw new Error(`${attestation.ref} missing int256 field ${name}`);
 }
 
 function isRef(value: unknown): value is { ref: string } {

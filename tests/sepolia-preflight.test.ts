@@ -72,6 +72,7 @@ describe("resolveSepoliaPreflight", () => {
     expect(result.missingPathAnchors.map((anchor) => anchor.path)).toEqual([
       "/agents/demo/status.json"
     ]);
+    expect(result.activeVisibilityTagRefs).toEqual([]);
     expect(client.resolveAnchorCalls).toContainEqual({
       parent: demo,
       name: "status.json",
@@ -107,6 +108,42 @@ describe("resolveSepoliaPreflight", () => {
       name: "Q%26A%3A%20Episode%205.json",
       forSchema: EFS_SCHEMA_UIDS.DATA
     });
+  });
+
+  it("detects already-active folder visibility tags", async () => {
+    const root = uid(11);
+    const agents = uid(12);
+    const demo = uid(13);
+    const client = new FakeReadClient(
+      root,
+      {
+        [pathKey(root, "agents")]: agents,
+        [pathKey(agents, "demo")]: demo,
+        [anchorKey(demo, "status.json", EFS_SCHEMA_UIDS.DATA)]: ZERO_UID
+      },
+      {
+        [tagKey(agents, EFS_SCHEMA_UIDS.DATA, context.attester.address)]: true
+      }
+    );
+    const plan = buildFileWritePlan(
+      {
+        path: "/agents/demo/status.json",
+        content: {
+          mode: "hash_only",
+          payload_sha256:
+            "sha256:43258cff783fe7036d8a43033f830adfc60ec037382473548ac742b888292777"
+        }
+      },
+      context
+    );
+
+    const result = await resolveSepoliaPreflight(plan, { publicClient: client });
+
+    expect(result.activeVisibilityTagRefs).toEqual(["visibility.tag:/agents"]);
+    expect(client.activeTagCalls).toEqual([
+      { target: agents, definition: EFS_SCHEMA_UIDS.DATA, attesters: [context.attester.address] },
+      { target: demo, definition: EFS_SCHEMA_UIDS.DATA, attesters: [context.attester.address] }
+    ]);
   });
 
   it("rejects a zero root anchor and missing transport anchors", async () => {
@@ -159,18 +196,39 @@ function uid(n: number): Uid {
 class FakeReadClient {
   readonly resolvePathCalls: { parent: Uid; name: string }[] = [];
   readonly resolveAnchorCalls: { parent: Uid; name: string; forSchema: Uid }[] = [];
+  readonly activeTagCalls: { target: Uid; definition: Uid; attesters: readonly `0x${string}`[] }[] = [];
 
   constructor(
     private readonly root: Uid,
-    private readonly paths: Record<string, Uid>
+    private readonly paths: Record<string, Uid>,
+    private readonly activeTags: Record<string, boolean> = {}
   ) {}
 
+  async readContract(args: { functionName: "rootAnchorUID"; args?: readonly unknown[] }): Promise<Uid>;
+  async readContract(args: { functionName: "resolvePath"; args?: readonly unknown[] }): Promise<Uid>;
+  async readContract(args: { functionName: "resolveAnchor"; args?: readonly unknown[] }): Promise<Uid>;
   async readContract(args: {
-    functionName: "rootAnchorUID" | "resolvePath" | "resolveAnchor";
+    functionName: "hasActiveTagFromAny";
     args?: readonly unknown[];
-  }): Promise<Uid> {
+  }): Promise<boolean>;
+  async readContract(args: {
+    functionName: "rootAnchorUID" | "resolvePath" | "resolveAnchor" | "hasActiveTagFromAny";
+    args?: readonly unknown[];
+  }): Promise<Uid | boolean> {
     if (args.functionName === "rootAnchorUID") {
       return this.root;
+    }
+    if (args.functionName === "hasActiveTagFromAny") {
+      const [target, definition, attesters] = args.args ?? [];
+      const normalizedAttesters = (attesters ?? []) as readonly `0x${string}`[];
+      this.activeTagCalls.push({
+        target: target as Uid,
+        definition: definition as Uid,
+        attesters: normalizedAttesters
+      });
+      return normalizedAttesters.some(
+        (attester) => this.activeTags[tagKey(target as Uid, definition as Uid, attester)] === true
+      );
     }
     if (args.functionName === "resolveAnchor") {
       const [parent, name, forSchema] = args.args ?? [];
@@ -193,4 +251,8 @@ function pathKey(parent: Uid, name: string): string {
 
 function anchorKey(parent: Uid, name: string, forSchema: Uid): string {
   return `anchor:${parent}:${name}:${forSchema}`;
+}
+
+function tagKey(target: Uid, definition: Uid, attester: `0x${string}`): string {
+  return `tag:${target}:${definition}:${attester.toLowerCase()}`;
 }

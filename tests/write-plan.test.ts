@@ -72,6 +72,8 @@ describe("buildFileWritePlan", () => {
     expect(refs.get("anchor:/agents/demo/status.json")?.schema).toBe(EFS_SCHEMA_UIDS.ANCHOR);
     expect(refs.get("placement.pin")?.schema).toBe(EFS_SCHEMA_UIDS.PIN);
     expect(refs.get("mirror.0")?.schema).toBe(EFS_SCHEMA_UIDS.MIRROR);
+    expect(refs.get("visibility.tag:/agents")?.schema).toBe(EFS_SCHEMA_UIDS.TAG);
+    expect(refs.get("visibility.tag:/agents/demo")?.schema).toBe(EFS_SCHEMA_UIDS.TAG);
     expect(refs.get("property:contentHash.pin")?.schema).toBe(EFS_SCHEMA_UIDS.PIN);
     expect(refs.get("property:name.pin")?.schema).toBe(EFS_SCHEMA_UIDS.PIN);
     expect(refs.get("property:schema.pin")?.schema).toBe(EFS_SCHEMA_UIDS.PIN);
@@ -85,6 +87,18 @@ describe("buildFileWritePlan", () => {
     expect(refs.get("placement.pin")?.refUID).toEqual({ ref: "data" });
     expect(refs.get("placement.pin")?.fields).toMatchObject({
       definition: { ref: "anchor:/agents/demo/status.json" }
+    });
+    expect(refs.get("visibility.tag:/agents")?.refUID).toEqual({ ref: "anchor:/agents" });
+    expect(refs.get("visibility.tag:/agents")?.fields).toMatchObject({
+      definition: EFS_SCHEMA_UIDS.DATA,
+      weight: "1"
+    });
+    expect(refs.get("visibility.tag:/agents/demo")?.refUID).toEqual({
+      ref: "anchor:/agents/demo"
+    });
+    expect(refs.get("visibility.tag:/agents/demo")?.fields).toMatchObject({
+      definition: EFS_SCHEMA_UIDS.DATA,
+      weight: "1"
     });
     expect(refs.get("anchor:/agents")?.refUID).toEqual({ external: "efs.rootAnchorUID" });
     expect(refs.get("mirror.0")?.fields).toMatchObject({
