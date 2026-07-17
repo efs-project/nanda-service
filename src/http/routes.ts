@@ -104,44 +104,54 @@ export async function registerRoutes(
     }
   });
 
-  app.setErrorHandler((error, _request, reply) => {
+  app.setErrorHandler((error, request, reply) => {
     const statusCode = (error as { statusCode?: unknown }).statusCode;
     if (statusCode === 413) {
+      auditError(request, 413, "payload_too_large", "Request body is too large");
       void reply.status(413).send({ error: "payload_too_large", message: "Request body is too large" });
       return;
     }
     if (error instanceof HttpError) {
+      auditError(request, error.statusCode, error.code, error.message);
       void reply.status(error.statusCode).send({ error: error.code, message: error.message });
       return;
     }
     if (error instanceof ZodError) {
+      auditError(request, 400, "bad_request", summarizeZodError(error));
       void reply.status(400).send({ error: "bad_request", message: error.message });
       return;
     }
     if (error instanceof EfsWritePlanError) {
+      auditError(request, 400, "bad_request", error.message);
       void reply.status(400).send({ error: "bad_request", message: error.message });
       return;
     }
     if (error instanceof EfsFileRemoveError) {
+      auditError(request, 404, "not_found", error.message);
       void reply.status(404).send({ error: "not_found", message: error.message });
       return;
     }
     if (error instanceof EfsFileWriteConflictError) {
+      auditError(request, 409, "conflict", error.message);
       void reply.status(409).send({ error: "conflict", message: error.message });
       return;
     }
     if (error instanceof SepoliaPreflightError || error instanceof SepoliaSubmitError) {
+      auditError(request, 503, "sepolia_write_error", error.message);
       void reply.status(503).send(sepoliaErrorBody(error));
       return;
     }
     if (error instanceof IpfsPinningError) {
+      auditError(request, 503, "ipfs_pin_error", error.message);
       void reply.status(503).send({ error: "ipfs_pin_error", message: error.message });
       return;
     }
     if (error instanceof IpfsReadError) {
+      auditError(request, 502, "ipfs_read_error", error.message);
       void reply.status(502).send({ error: "ipfs_read_error", message: error.message });
       return;
     }
+    auditError(request, 500, "internal_error", "Unexpected service error");
     void reply.status(500).send({ error: "internal_error", message: "Unexpected service error" });
   });
 
@@ -660,6 +670,15 @@ export async function registerRoutes(
       throw badGateway("integrity_mismatch", "Fetched bytes did not match the EFS payload hash");
     }
 
+    auditInfo(request, "file.read", {
+      path,
+      attester: receipt.agent_lens.attester,
+      receipt_id: receipt.receipt_id,
+      payload_sha256: receipt.integrity.payload_sha256,
+      mirror_transport: mirror.transport,
+      byte_length: fetched.bytes.byteLength
+    });
+
     return reply
       .type(fetched.contentType ?? "application/octet-stream")
       .header("content-length", String(fetched.bytes.byteLength))
@@ -685,6 +704,14 @@ export async function registerRoutes(
     });
     const plan = await writer.planFile(prepared, context);
 
+    auditInfo(request, "file.plan", {
+      ...requestAuditContext(context, prepared),
+      storage: prepared.options.storage,
+      content_mode: prepared.content.mode,
+      mirrors_count: prepared.mirrors.length,
+      planned_layers_count: plan.layers.length
+    });
+
     return planResponse(plan, config);
   });
 
@@ -702,6 +729,14 @@ export async function registerRoutes(
         }
       });
       const plan = await writer.planFile(prepared, context);
+      auditInfo(request, "file.plan", {
+        ...requestAuditContext(context, prepared),
+        dry_run: true,
+        storage: prepared.options.storage,
+        content_mode: prepared.content.mode,
+        mirrors_count: prepared.mirrors.length,
+        planned_layers_count: plan.layers.length
+      });
       return planResponse(plan, config);
     }
 
@@ -716,6 +751,7 @@ export async function registerRoutes(
       ipfsRateLimiter,
       ipfsAddSemaphore
     });
+    auditSubmission(request, "file.write", context, submission);
     return sendSubmission(_reply, submission);
   });
 
@@ -731,6 +767,7 @@ export async function registerRoutes(
       context,
       writeRateLimiter
     });
+    auditSubmission(request, "file.remove", context, submission);
     return sendSubmission(_reply, submission);
   });
 
@@ -740,6 +777,15 @@ export async function registerRoutes(
     if (receipt === undefined) {
       throw notFound("Receipt not found");
     }
+    auditInfo(request, "receipt.get", {
+      receipt_id: receipt.receipt_id,
+      operation: receipt.operation,
+      status: receipt.status,
+      mode: receipt.mode,
+      path: receipt.efs.path,
+      attester: receipt.agent_lens.attester,
+      tx_hashes_count: receipt.efs.tx_hashes.length
+    });
     return { receipt, links: receipt.links };
   });
 
@@ -751,6 +797,15 @@ export async function registerRoutes(
     if (receipt === undefined) {
       throw notFound("No receipt found for path");
     }
+
+    auditInfo(request, "file.resolve", {
+      path,
+      attester: receipt.agent_lens.attester,
+      receipt_id: receipt.receipt_id,
+      operation: receipt.operation,
+      status: receipt.status,
+      payload_sha256: receipt.integrity.payload_sha256
+    });
 
     return {
       path,
@@ -767,7 +822,19 @@ export async function registerRoutes(
   app.post("/v1/verify", async (request: FastifyRequest) => {
     const body = VerifyReceiptBodySchema.parse(request.body);
     const receipt = body.receipt;
-    return writer.verifyReceipt(receipt);
+    const verification = await writer.verifyReceipt(receipt);
+    auditInfo(request, "receipt.verify", {
+      receipt_id: receipt.receipt_id,
+      operation: receipt.operation,
+      status: receipt.status,
+      mode: receipt.mode,
+      path: receipt.efs.path,
+      attester: receipt.agent_lens.attester,
+      tx_hashes_count: receipt.efs.tx_hashes.length,
+      checks_count: verification.checks.length,
+      checks_failed_count: verification.checks.filter((check) => !check.ok).length
+    });
+    return verification;
   });
 }
 
@@ -1058,6 +1125,106 @@ function planResponse(plan: unknown, config: AppConfig) {
       capabilities: `${config.publicBaseUrl}/v1/capabilities`
     }
   };
+}
+
+function auditInfo(request: FastifyRequest, event: string, details: Record<string, unknown>): void {
+  request.log.info({
+    audit: {
+      service: "efs-scribe",
+      event,
+      request_id: request.id,
+      method: request.method,
+      route: request.url.split("?")[0],
+      ...details
+    }
+  }, "efs_scribe.audit");
+}
+
+function auditError(
+  request: FastifyRequest,
+  statusCode: number,
+  code: string,
+  message: string
+): void {
+  request.log.warn({
+    audit: {
+      service: "efs-scribe",
+      event: "request.error",
+      request_id: request.id,
+      method: request.method,
+      route: request.url.split("?")[0],
+      status_code: statusCode,
+      error: code,
+      message: truncateForLog(message)
+    }
+  }, "efs_scribe.audit");
+}
+
+function auditSubmission(
+  request: FastifyRequest,
+  event: "file.write" | "file.remove",
+  context: WriterContext,
+  submission: SubmissionResult
+): void {
+  const receipt = submission.receipt;
+  auditInfo(request, event, {
+    ...contextAuditFields(context),
+    operation: receipt.operation,
+    status: receipt.status,
+    mode: receipt.mode,
+    path: receipt.efs.path,
+    receipt_id: receipt.receipt_id,
+    payload_sha256: receipt.integrity.payload_sha256,
+    tx_hashes: receipt.efs.tx_hashes,
+    tx_hashes_count: receipt.efs.tx_hashes.length,
+    block_numbers: receipt.efs.block_numbers,
+    mirrors_count: receipt.efs.mirrors.length,
+    properties_count: Object.keys(receipt.efs.uids.properties).length,
+    checks_count: receipt.verification.checks.length,
+    checks_failed_count: receipt.verification.checks.filter((check) => !check.ok).length,
+    error: submission.error === undefined ? undefined : "sepolia_write_error",
+    error_message: submission.error === undefined ? undefined : truncateForLog(submission.error.message)
+  });
+}
+
+function requestAuditContext(
+  context: WriterContext,
+  parsed: FileWriteRequest | FileRemoveRequest
+): Record<string, unknown> {
+  return {
+    ...contextAuditFields(context),
+    path: normalizeEfsPath(parsed.path).canonicalPath,
+    claimed_nanda_id: parsed.agent.claimed_nanda_id,
+    idempotency_key_present: parsed.options.idempotency_key !== undefined
+  };
+}
+
+function contextAuditFields(context: WriterContext): Record<string, unknown> {
+  return {
+    auth_method: context.auth.method,
+    auth_level: context.auth.auth_level,
+    authenticated_subject_hash: subjectHash(context.auth.authenticated_subject),
+    claimed_nanda_id: context.auth.claimed_nanda_id,
+    attester: context.attester.address
+  };
+}
+
+function subjectHash(subject: string): `sha256:${string}` {
+  return sha256Hex(subject);
+}
+
+function summarizeZodError(error: ZodError): string {
+  return error.issues
+    .slice(0, 3)
+    .map((issue) => {
+      const path = issue.path.length === 0 ? "<root>" : issue.path.join(".");
+      return `${path}: ${issue.message}`;
+    })
+    .join("; ");
+}
+
+function truncateForLog(message: string): string {
+  return message.length <= 500 ? message : `${message.slice(0, 497)}...`;
 }
 
 function requireFileDeleteCapability(context: WriterContext): void {

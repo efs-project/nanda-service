@@ -1255,6 +1255,52 @@ describe("HTTP API", () => {
     await app.close();
   });
 
+  it("emits structured audit logs for file writes without logging API keys", async () => {
+    const lines: string[] = [];
+    const app = Fastify({
+      logger: {
+        level: "info",
+        stream: {
+          write(line: string) {
+            lines.push(line);
+          }
+        }
+      }
+    });
+    await registerRoutes(app, testConfig, new OfflineEfsWriter());
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/files",
+      headers: { authorization: "Bearer local-scribe-key" },
+      payload: writeBody
+    });
+
+    expect(response.statusCode).toBe(200);
+    const receipt = response.json().receipt as EfsScribeReceipt;
+    const auditLogs = lines
+      .map((line) => JSON.parse(line) as { msg?: string; audit?: Record<string, unknown> })
+      .filter((line) => line.msg === "efs_scribe.audit")
+      .map((line) => line.audit);
+    const writeAudit = auditLogs.find((audit) => audit?.event === "file.write");
+
+    expect(writeAudit).toMatchObject({
+      service: "efs-scribe",
+      event: "file.write",
+      operation: "file.upsert",
+      status: "confirmed",
+      mode: "offline",
+      path: "/agents/demo/status.json",
+      receipt_id: receipt.receipt_id,
+      attester: receipt.agent_lens.attester,
+      tx_hashes_count: 0,
+      authenticated_subject_hash: expect.stringMatching(/^sha256:[0-9a-f]{64}$/)
+    });
+    expect(JSON.stringify(auditLogs)).not.toContain("local-scribe-key");
+
+    await app.close();
+  });
+
   it("deduplicates concurrent writes with the same idempotency key before submitting", async () => {
     const writer = new SlowOfflineWriter({ now: () => new Date("2026-07-08T00:00:00Z") });
     const app = await appWithWriter(writer);
