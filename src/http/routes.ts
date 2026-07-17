@@ -1,7 +1,7 @@
 import { readFile } from "node:fs/promises";
 
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
-import { createPublicClient, formatEther, http } from "viem";
+import { createPublicClient, formatEther } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { sepolia } from "viem/chains";
 import { z, ZodError } from "zod";
@@ -12,7 +12,7 @@ import { deriveAttester } from "../auth/derived-attester.js";
 import { EFS_SCHEMA_UIDS, EFS_SEPOLIA, EFS_TRANSPORTS, SEPOLIA_CHAIN_ID } from "../config/chains.js";
 import type { AppConfig } from "../config/env.js";
 import { EFS_INDEXER_ABI, SepoliaPreflightError } from "../efs/sepolia-preflight.js";
-import { SepoliaSubmitError } from "../efs/sepolia-writer.js";
+import { sepoliaRpcTransport, SepoliaSubmitError } from "../efs/sepolia-writer.js";
 import { EfsWritePlanError, normalizeEfsPath } from "../efs/write-plan.js";
 import {
   EfsFileRemoveError,
@@ -220,6 +220,7 @@ export async function registerRoutes(
           event: "health.degraded",
           status: status.status,
           checks_failed: status.checks.filter((check) => !check.ok).map((check) => check.name),
+          failed_checks: status.checks.filter((check) => !check.ok),
           mode: status.mode
         }
       }, "efs_scribe.alert");
@@ -1274,7 +1275,7 @@ async function deepHealthStatus(config: AppConfig): Promise<DeepHealthStatus> {
 
   const publicClient = createPublicClient({
     chain: sepolia,
-    transport: http(config.sepolia.rpcUrl)
+    transport: sepoliaRpcTransport(config.sepolia.rpcUrl)
   });
 
   try {
@@ -1290,7 +1291,7 @@ async function deepHealthStatus(config: AppConfig): Promise<DeepHealthStatus> {
     checks.push({
       name: "sepolia_rpc_chain_id",
       ok: false,
-      detail: truncateForLog(errorMessageForHealth(error))
+      detail: healthErrorDetail(error)
     });
   }
 
@@ -1310,7 +1311,7 @@ async function deepHealthStatus(config: AppConfig): Promise<DeepHealthStatus> {
     checks.push({
       name: "efs_root_anchor",
       ok: false,
-      detail: truncateForLog(errorMessageForHealth(error))
+      detail: healthErrorDetail(error)
     });
   }
 
@@ -1345,7 +1346,7 @@ async function deepHealthStatus(config: AppConfig): Promise<DeepHealthStatus> {
         name: "sepolia_sponsor_balance",
         ok: false,
         threshold: config.sepolia.sponsorLowBalanceWei.toString(),
-        detail: truncateForLog(errorMessageForHealth(error))
+        detail: healthErrorDetail(error)
       });
     }
   } else {
@@ -1368,6 +1369,14 @@ async function deepHealthStatus(config: AppConfig): Promise<DeepHealthStatus> {
 function finalizeDeepHealthStatus(status: DeepHealthStatus): void {
   status.ok = status.checks.every((check) => check.ok);
   status.status = status.ok ? "ok" : "degraded";
+}
+
+function healthErrorDetail(error: unknown): string {
+  return truncateForLog(redactHealthDetail(errorMessageForHealth(error)));
+}
+
+function redactHealthDetail(message: string): string {
+  return message.replace(/https?:\/\/\S+/gi, "[redacted-url]");
 }
 
 function errorMessageForHealth(error: unknown): string {

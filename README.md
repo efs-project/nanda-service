@@ -195,6 +195,12 @@ degraded and emits an `efs_scribe.alert` log. The default sponsor low-balance
 threshold is 0.1 Sepolia ETH; override it with
 `SEPOLIA_SPONSOR_LOW_BALANCE_WEI`.
 
+Keep Railway pointed at `/health` for process liveness. Add a separate uptime
+monitor for `/health/deep` and alert after a few consecutive failures or if the
+JSON body does not report `"mode": "sepolia"` in production. Search Railway logs
+for `efs_scribe.alert` to see failed check names and details such as
+`sepolia_sponsor_balance`, balance, and threshold.
+
 Receipt lookup is currently memory-only. On-chain writes remain on Sepolia, but
 `GET /v1/receipts/:id` and `GET /v1/resolve` only know receipts created since
 the current service process started.

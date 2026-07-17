@@ -674,7 +674,7 @@ export function createSepoliaEfsWriter(config: AppConfig): SepoliaEfsWriter {
   });
 }
 
-function sepoliaRpcTransport(primaryRpcUrl: string) {
+export function sepoliaRpcTransport(primaryRpcUrl: string) {
   const urls = [primaryRpcUrl, ...DEFAULT_SEPOLIA_RPC_FALLBACK_URLS].filter(
     (url, index, all) => all.indexOf(url) === index
   );

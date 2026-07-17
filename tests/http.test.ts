@@ -2,6 +2,7 @@ import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 
 import Fastify from "fastify";
+import { privateKeyToAccount } from "viem/accounts";
 import { describe, expect, it } from "vitest";
 
 import { EFS_SEPOLIA, EFS_TRANSPORTS } from "../src/config/chains.js";
@@ -115,9 +116,9 @@ describe("HTTP API", () => {
       ok: true,
       status: "ok",
       service: "efs-scribe",
-      mode: "offline",
-      checks: [{ name: "service_process", ok: true }]
+      mode: "offline"
     });
+    expect(deepHealth.json().checks).toEqual(expect.arrayContaining([{ name: "service_process", ok: true }]));
     expect(capabilities.statusCode).toBe(200);
     expect(capabilities.json()).toMatchObject({
       service: "efs-scribe",
@@ -237,6 +238,120 @@ describe("HTTP API", () => {
     });
 
     await app.close();
+  });
+
+  it("reports healthy Sepolia deep health with sponsor balance", async () => {
+    const sponsorPrivateKey = `0x${"1".repeat(64)}` as const;
+    const sponsor = privateKeyToAccount(sponsorPrivateKey);
+    const rpc = await startFakeSepoliaRpc({
+      balances: {
+        [sponsor.address.toLowerCase()]: 250_000_000_000_000_000n
+      }
+    });
+    const app = Fastify({ logger: false });
+    await registerRoutes(app, sepoliaHealthConfig(rpc.url, sponsorPrivateKey), new OfflineEfsWriter());
+
+    const response = await app.inject({ method: "GET", url: "/health/deep" });
+
+    expect(response.statusCode).toBe(200);
+    const body = response.json();
+    expect(body).toMatchObject({
+      ok: true,
+      status: "ok",
+      mode: "sepolia",
+      sepolia: {
+        configured: true,
+        ready: true,
+        sponsor: {
+          configured: true,
+          address: sponsor.address,
+          balance_wei: "250000000000000000",
+          low_balance: false
+        }
+      }
+    });
+    expect(body.checks).toEqual(expect.arrayContaining([
+      { name: "sepolia_config", ok: true },
+      { name: "sepolia_rpc_chain_id", ok: true, value: 11155111 },
+      { name: "efs_root_anchor", ok: true, value: expect.any(String) },
+      {
+        name: "sepolia_sponsor_balance",
+        ok: true,
+        value: "250000000000000000",
+        threshold: "100000000000000000"
+      }
+    ]));
+
+    await app.close();
+    await rpc.close();
+  });
+
+  it("reports low sponsor gas as degraded and emits an alert log", async () => {
+    const sponsorPrivateKey = `0x${"1".repeat(64)}` as const;
+    const sponsor = privateKeyToAccount(sponsorPrivateKey);
+    const rpc = await startFakeSepoliaRpc({
+      balances: {
+        [sponsor.address.toLowerCase()]: 99_999_999_999_999_999n
+      }
+    });
+    const lines: string[] = [];
+    const app = Fastify({
+      logger: {
+        level: "info",
+        stream: {
+          write(line: string) {
+            lines.push(line);
+          }
+        }
+      }
+    });
+    await registerRoutes(app, sepoliaHealthConfig(rpc.url, sponsorPrivateKey), new OfflineEfsWriter());
+
+    const response = await app.inject({ method: "GET", url: "/health/deep" });
+
+    expect(response.statusCode).toBe(503);
+    const body = response.json();
+    expect(body).toMatchObject({
+      ok: false,
+      status: "degraded",
+      sepolia: {
+        sponsor: {
+          address: sponsor.address,
+          balance_wei: "99999999999999999",
+          low_balance: true
+        }
+      }
+    });
+    expect(body.checks).toEqual(expect.arrayContaining([
+      {
+        name: "sepolia_sponsor_balance",
+        ok: false,
+        value: "99999999999999999",
+        threshold: "100000000000000000",
+        detail: "sponsor wallet balance is below threshold"
+      }
+    ]));
+
+    const alert = alertLogsFrom(lines).find((entry) => entry?.event === "health.degraded");
+    expect(alert).toMatchObject({
+      event: "health.degraded",
+      status: "degraded",
+      checks_failed: ["sepolia_sponsor_balance"],
+      failed_checks: [
+        {
+          name: "sepolia_sponsor_balance",
+          ok: false,
+          value: "99999999999999999",
+          threshold: "100000000000000000",
+          detail: "sponsor wallet balance is below threshold"
+        }
+      ],
+      mode: "sepolia"
+    });
+    expect(lines.join("")).not.toContain(sponsorPrivateKey);
+
+    await app.close();
+    await rpc.close();
   });
 
   it("requires auth for file writes and removals", async () => {
@@ -1764,6 +1879,34 @@ function auditLogsFrom(lines: string[]): Array<Record<string, unknown> | undefin
     .map((line) => line.audit);
 }
 
+function alertLogsFrom(lines: string[]): Array<Record<string, unknown> | undefined> {
+  return lines
+    .map((line) => JSON.parse(line) as { msg?: string; alert?: Record<string, unknown> })
+    .filter((line) => line.msg === "efs_scribe.alert")
+    .map((line) => line.alert);
+}
+
+function sepoliaHealthConfig(
+  rpcUrl: string,
+  sponsorPrivateKey: `0x${string}`
+): AppConfig {
+  return {
+    ...testConfig,
+    mode: "sepolia",
+    apiKeysJson: '{"real-key":"api-key:real-agent"}',
+    derivationSecret: "realistic-non-default-derivation-secret",
+    sepolia: {
+      ready: true,
+      missing: [],
+      rpcUrl,
+      easAddress: EFS_SEPOLIA.eas,
+      agentFundingTargetWei: 50_000_000_000_000_000n,
+      sponsorLowBalanceWei: 100_000_000_000_000_000n,
+      serviceSponsorPrivateKey: sponsorPrivateKey
+    }
+  };
+}
+
 class SlowOfflineWriter extends OfflineEfsWriter {
   submitCount = 0;
   removeCount = 0;
@@ -1842,6 +1985,98 @@ interface FakeIpfsServer {
   gatewayUrl: string;
   requests: Array<{ method?: string; url: string; bodyBytes: number; authorization?: string }>;
   close: () => Promise<void>;
+}
+
+interface FakeSepoliaRpcServer {
+  url: string;
+  requests: unknown[];
+  close: () => Promise<void>;
+}
+
+async function listen(server: Server): Promise<void> {
+  await new Promise<void>((resolve) => {
+    server.listen(0, "127.0.0.1", resolve);
+  });
+}
+
+async function closeServer(server: Server): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    server.close((error) => (error === undefined ? resolve() : reject(error)));
+  });
+}
+
+async function startFakeSepoliaRpc(
+  options: {
+    chainIdHex?: string;
+    rootAnchorUid?: `0x${string}`;
+    balances?: Record<string, bigint>;
+  } = {}
+): Promise<FakeSepoliaRpcServer> {
+  const requests: unknown[] = [];
+  const chainIdHex = options.chainIdHex ?? "0xaa36a7";
+  const rootAnchorUid = options.rootAnchorUid ?? "0x152ff2d9027128109ea1922c3b9563ea282c4dac6b1cc146078e391b8a693de6";
+  const balances = options.balances ?? {};
+  const server: Server = createServer((request, response) => {
+    const chunks: Buffer[] = [];
+    request.on("data", (chunk: Buffer) => chunks.push(chunk));
+    request.on("end", () => {
+      const body = Buffer.concat(chunks).toString("utf8");
+      const payload = JSON.parse(body) as JsonRpcRequest | JsonRpcRequest[];
+      requests.push(payload);
+      const result = Array.isArray(payload)
+        ? payload.map((entry) => fakeSepoliaRpcResponse(entry, { chainIdHex, rootAnchorUid, balances }))
+        : fakeSepoliaRpcResponse(payload, { chainIdHex, rootAnchorUid, balances });
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify(result));
+    });
+  });
+  await listen(server);
+  const { port } = server.address() as AddressInfo;
+  return {
+    url: `http://127.0.0.1:${port}`,
+    requests,
+    close: () => closeServer(server)
+  };
+}
+
+interface JsonRpcRequest {
+  id?: string | number | null;
+  jsonrpc?: string;
+  method: string;
+  params?: unknown[];
+}
+
+function fakeSepoliaRpcResponse(
+  request: JsonRpcRequest,
+  options: {
+    chainIdHex: string;
+    rootAnchorUid: string;
+    balances: Record<string, bigint>;
+  }
+) {
+  if (request.method === "eth_chainId") {
+    return jsonRpcResult(request, options.chainIdHex);
+  }
+  if (request.method === "eth_call") {
+    return jsonRpcResult(request, options.rootAnchorUid);
+  }
+  if (request.method === "eth_getBalance") {
+    const address = String(request.params?.[0] ?? "").toLowerCase();
+    return jsonRpcResult(request, `0x${(options.balances[address] ?? 0n).toString(16)}`);
+  }
+  return {
+    jsonrpc: "2.0",
+    id: request.id ?? null,
+    error: { code: -32601, message: `Unsupported method ${request.method}` }
+  };
+}
+
+function jsonRpcResult(request: JsonRpcRequest, result: string) {
+  return {
+    jsonrpc: "2.0",
+    id: request.id ?? null,
+    result
+  };
 }
 
 async function startFakeIpfs(

@@ -88,9 +88,12 @@ function buildSepoliaConfig(parsed: z.infer<typeof EnvSchema>): SepoliaConfig {
   const missing: string[] = [];
   const rpcUrl = usableUrl(parsed.SEPOLIA_RPC_URL);
   const agentFundingTargetWei = normalizeAgentFundingTarget(
-    parseWei(parsed.SEPOLIA_AGENT_FUNDING_TARGET_WEI)
+    parseWei(parsed.SEPOLIA_AGENT_FUNDING_TARGET_WEI, "SEPOLIA_AGENT_FUNDING_TARGET_WEI")
   );
-  const sponsorLowBalanceWei = parseWei(parsed.SEPOLIA_SPONSOR_LOW_BALANCE_WEI);
+  const sponsorLowBalanceWei = parseWei(
+    parsed.SEPOLIA_SPONSOR_LOW_BALANCE_WEI,
+    "SEPOLIA_SPONSOR_LOW_BALANCE_WEI"
+  );
   const serviceSponsorPrivateKey = usablePrivateKey(parsed.SERVICE_SPONSOR_PRIVATE_KEY);
   const receiptSignerPrivateKey = usablePrivateKey(parsed.RECEIPT_SIGNER_PRIVATE_KEY);
 
@@ -99,6 +102,12 @@ function buildSepoliaConfig(parsed: z.infer<typeof EnvSchema>): SepoliaConfig {
   }
   if (parsed.EFS_SCRIBE_MODE === "sepolia" && parsed.EFS_CHAIN_ID !== SEPOLIA_CHAIN_ID) {
     missing.push("EFS_CHAIN_ID");
+  }
+  if (
+    parsed.EFS_SCRIBE_MODE === "sepolia" &&
+    parsed.EFS_EAS_ADDRESS.toLowerCase() !== SEPOLIA_EAS_ADDRESS.toLowerCase()
+  ) {
+    missing.push("EFS_EAS_ADDRESS");
   }
   if (agentFundingTargetWei > 0n && serviceSponsorPrivateKey === undefined) {
     missing.push("SERVICE_SPONSOR_PRIVATE_KEY");
@@ -143,10 +152,10 @@ function usablePrivateKey(value: string): `0x${string}` | undefined {
   return undefined;
 }
 
-function parseWei(value: string): bigint {
+function parseWei(value: string, envName: string): bigint {
   const trimmed = value.trim();
   if (!/^\d+$/.test(trimmed)) {
-    throw new Error("SEPOLIA_AGENT_FUNDING_TARGET_WEI must be a non-negative integer");
+    throw new Error(`${envName} must be a non-negative integer`);
   }
   return BigInt(trimmed);
 }
