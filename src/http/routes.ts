@@ -1,14 +1,17 @@
 import { readFile } from "node:fs/promises";
 
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
+import { createPublicClient, formatEther, http } from "viem";
+import { privateKeyToAccount } from "viem/accounts";
+import { sepolia } from "viem/chains";
 import { z, ZodError } from "zod";
 
 import type { ApiKeyMap } from "../auth/api-key.js";
 import { authenticateApiKey, parseApiKeys } from "../auth/api-key.js";
 import { deriveAttester } from "../auth/derived-attester.js";
-import { EFS_SCHEMA_UIDS, EFS_SEPOLIA, EFS_TRANSPORTS } from "../config/chains.js";
+import { EFS_SCHEMA_UIDS, EFS_SEPOLIA, EFS_TRANSPORTS, SEPOLIA_CHAIN_ID } from "../config/chains.js";
 import type { AppConfig } from "../config/env.js";
-import { SepoliaPreflightError } from "../efs/sepolia-preflight.js";
+import { EFS_INDEXER_ABI, SepoliaPreflightError } from "../efs/sepolia-preflight.js";
 import { SepoliaSubmitError } from "../efs/sepolia-writer.js";
 import { EfsWritePlanError, normalizeEfsPath } from "../efs/write-plan.js";
 import {
@@ -54,6 +57,7 @@ const WRITE_RATE_LIMIT_CAPACITY = 10;
 const WRITE_RATE_LIMIT_REFILL_TOKENS = 5;
 const WRITE_RATE_LIMIT_REFILL_MS = 60_000;
 const requestAuditDetails = new WeakMap<FastifyRequest, Record<string, unknown>>();
+const ZERO_UID = `0x${"0".repeat(64)}` as const;
 
 const ResolveQuerySchema = z.object({
   path: z.string().min(1),
@@ -77,6 +81,39 @@ interface SubmissionResult {
 interface PendingIdempotentSubmission {
   originalRequestHash: string;
   result: Promise<SubmissionResult>;
+}
+
+interface DeepHealthCheck {
+  name: string;
+  ok: boolean;
+  detail?: string;
+  value?: string | number | boolean;
+  threshold?: string;
+}
+
+interface DeepHealthStatus {
+  ok: boolean;
+  status: "ok" | "degraded";
+  service: "efs-scribe";
+  mode: AppConfig["mode"];
+  checked_at: string;
+  checks: DeepHealthCheck[];
+  sepolia?: {
+    configured: boolean;
+    ready: boolean;
+    missing: string[];
+    rpc_url_configured: boolean;
+    chain_id?: number;
+    root_anchor_uid?: string;
+    sponsor?: {
+      configured: boolean;
+      address?: string;
+      balance_wei?: string;
+      balance_eth?: string;
+      low_balance_threshold_wei: string;
+      low_balance: boolean;
+    };
+  };
 }
 
 export async function registerRoutes(
@@ -174,12 +211,29 @@ export async function registerRoutes(
     mode: config.mode
   }));
 
+  app.get("/health/deep", async (request, reply) => {
+    const status = await deepHealthStatus(config);
+    if (!status.ok) {
+      request.log.warn({
+        alert: {
+          service: "efs-scribe",
+          event: "health.degraded",
+          status: status.status,
+          checks_failed: status.checks.filter((check) => !check.ok).map((check) => check.name),
+          mode: status.mode
+        }
+      }, "efs_scribe.alert");
+    }
+    return reply.status(status.ok ? 200 : 503).send(status);
+  });
+
   app.get("/", async () => ({
     service: "efs-scribe",
     mode: config.mode,
     summary: "Agent-friendly EFS file bytes, receipts, and write-plan previews.",
     links: {
       health: "/health",
+      deep_health: "/health/deep",
       skill: "/skill.md",
       skill_canonical: "/SKILL.md",
       openapi: "/openapi.json",
@@ -212,6 +266,7 @@ export async function registerRoutes(
     paths: {
       "/": { get: { summary: "Service index" } },
       "/health": { get: { summary: "Healthcheck" } },
+      "/health/deep": { get: { summary: "Deep healthcheck for Sepolia RPC, EFS contracts, and sponsor gas" } },
       "/SKILL.md": { get: { summary: "Agent-facing skill instructions" } },
       "/skill.md": { get: { summary: "Agent-facing skill instructions" } },
       "/v1/capabilities": { get: { summary: "Service capabilities" } },
@@ -588,6 +643,7 @@ export async function registerRoutes(
     public_endpoints: [
       "/",
       "/health",
+      "/health/deep",
       "/skill.md",
       "/SKILL.md",
       "/openapi.json",
@@ -1178,6 +1234,153 @@ function planResponse(plan: unknown, config: AppConfig) {
       capabilities: `${config.publicBaseUrl}/v1/capabilities`
     }
   };
+}
+
+async function deepHealthStatus(config: AppConfig): Promise<DeepHealthStatus> {
+  const checks: DeepHealthCheck[] = [
+    { name: "service_process", ok: true }
+  ];
+  const status: DeepHealthStatus = {
+    ok: true,
+    status: "ok",
+    service: "efs-scribe",
+    mode: config.mode,
+    checked_at: new Date().toISOString(),
+    checks
+  };
+
+  if (config.mode !== "sepolia") {
+    return status;
+  }
+
+  const sepoliaStatus: NonNullable<DeepHealthStatus["sepolia"]> = {
+    configured: config.sepolia.ready,
+    ready: config.sepolia.ready,
+    missing: config.sepolia.missing,
+    rpc_url_configured: config.sepolia.rpcUrl !== undefined
+  };
+  status.sepolia = sepoliaStatus;
+
+  checks.push({
+    name: "sepolia_config",
+    ok: config.sepolia.ready,
+    detail: config.sepolia.ready ? undefined : `missing: ${config.sepolia.missing.join(", ")}`
+  });
+
+  if (config.sepolia.rpcUrl === undefined) {
+    finalizeDeepHealthStatus(status);
+    return status;
+  }
+
+  const publicClient = createPublicClient({
+    chain: sepolia,
+    transport: http(config.sepolia.rpcUrl)
+  });
+
+  try {
+    const chainId = await publicClient.getChainId();
+    sepoliaStatus.chain_id = chainId;
+    checks.push({
+      name: "sepolia_rpc_chain_id",
+      ok: chainId === SEPOLIA_CHAIN_ID,
+      value: chainId,
+      detail: chainId === SEPOLIA_CHAIN_ID ? undefined : `expected ${SEPOLIA_CHAIN_ID}`
+    });
+  } catch (error) {
+    checks.push({
+      name: "sepolia_rpc_chain_id",
+      ok: false,
+      detail: truncateForLog(errorMessageForHealth(error))
+    });
+  }
+
+  try {
+    const rootAnchorUid = await publicClient.readContract({
+      address: EFS_SEPOLIA.indexer,
+      abi: EFS_INDEXER_ABI,
+      functionName: "rootAnchorUID"
+    });
+    sepoliaStatus.root_anchor_uid = rootAnchorUid;
+    checks.push({
+      name: "efs_root_anchor",
+      ok: rootAnchorUid.toLowerCase() !== ZERO_UID,
+      value: rootAnchorUid
+    });
+  } catch (error) {
+    checks.push({
+      name: "efs_root_anchor",
+      ok: false,
+      detail: truncateForLog(errorMessageForHealth(error))
+    });
+  }
+
+  if (config.sepolia.serviceSponsorPrivateKey !== undefined) {
+    const account = privateKeyToAccount(config.sepolia.serviceSponsorPrivateKey);
+    try {
+      const balance = await publicClient.getBalance({ address: account.address });
+      const lowBalance = balance < config.sepolia.sponsorLowBalanceWei;
+      sepoliaStatus.sponsor = {
+        configured: true,
+        address: account.address,
+        balance_wei: balance.toString(),
+        balance_eth: formatEther(balance),
+        low_balance_threshold_wei: config.sepolia.sponsorLowBalanceWei.toString(),
+        low_balance: lowBalance
+      };
+      checks.push({
+        name: "sepolia_sponsor_balance",
+        ok: !lowBalance,
+        value: balance.toString(),
+        threshold: config.sepolia.sponsorLowBalanceWei.toString(),
+        detail: lowBalance ? "sponsor wallet balance is below threshold" : undefined
+      });
+    } catch (error) {
+      sepoliaStatus.sponsor = {
+        configured: true,
+        address: account.address,
+        low_balance_threshold_wei: config.sepolia.sponsorLowBalanceWei.toString(),
+        low_balance: true
+      };
+      checks.push({
+        name: "sepolia_sponsor_balance",
+        ok: false,
+        threshold: config.sepolia.sponsorLowBalanceWei.toString(),
+        detail: truncateForLog(errorMessageForHealth(error))
+      });
+    }
+  } else {
+    sepoliaStatus.sponsor = {
+      configured: false,
+      low_balance_threshold_wei: config.sepolia.sponsorLowBalanceWei.toString(),
+      low_balance: config.sepolia.agentFundingTargetWei > 0n
+    };
+    checks.push({
+      name: "sepolia_sponsor_balance",
+      ok: config.sepolia.agentFundingTargetWei === 0n,
+      detail: config.sepolia.agentFundingTargetWei === 0n ? "agent auto-funding disabled" : "sponsor key missing"
+    });
+  }
+
+  finalizeDeepHealthStatus(status);
+  return status;
+}
+
+function finalizeDeepHealthStatus(status: DeepHealthStatus): void {
+  status.ok = status.checks.every((check) => check.ok);
+  status.status = status.ok ? "ok" : "degraded";
+}
+
+function errorMessageForHealth(error: unknown): string {
+  if (error !== null && typeof error === "object") {
+    const record = error as { shortMessage?: unknown; message?: unknown };
+    if (typeof record.shortMessage === "string") {
+      return record.shortMessage;
+    }
+    if (typeof record.message === "string") {
+      return record.message;
+    }
+  }
+  return String(error);
 }
 
 function auditInfo(request: FastifyRequest, event: string, details: Record<string, unknown>): void {

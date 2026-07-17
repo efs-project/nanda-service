@@ -188,6 +188,13 @@ The default automatic top-up target is 0.05 Sepolia ETH per derived agent wallet
 Positive non-zero targets below 0.05 Sepolia ETH are rounded up to that floor.
 The sample `local-scribe-key` is rejected in Sepolia mode.
 
+For monitoring, `GET /health` is a cheap liveness check and
+`GET /health/deep` verifies Sepolia configuration, RPC chain id, the EFS root
+anchor, and sponsor wallet balance. The deep health check returns `503` when
+degraded and emits an `efs_scribe.alert` log. The default sponsor low-balance
+threshold is 0.1 Sepolia ETH; override it with
+`SEPOLIA_SPONSOR_LOW_BALANCE_WEI`.
+
 Receipt lookup is currently memory-only. On-chain writes remain on Sepolia, but
 `GET /v1/receipts/:id` and `GET /v1/resolve` only know receipts created since
 the current service process started.

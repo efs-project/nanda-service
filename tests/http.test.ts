@@ -101,6 +101,7 @@ describe("HTTP API", () => {
       links: {
         skill: "/skill.md",
         skill_canonical: "/SKILL.md",
+        deep_health: "/health/deep",
         openapi: "/openapi.json",
         capabilities: "/v1/capabilities",
         delete_file: "/v1/files/delete"
@@ -108,6 +109,15 @@ describe("HTTP API", () => {
     });
     expect(health.statusCode).toBe(200);
     expect(health.json()).toMatchObject({ ok: true, mode: "offline" });
+    const deepHealth = await app.inject({ method: "GET", url: "/health/deep" });
+    expect(deepHealth.statusCode).toBe(200);
+    expect(deepHealth.json()).toMatchObject({
+      ok: true,
+      status: "ok",
+      service: "efs-scribe",
+      mode: "offline",
+      checks: [{ name: "service_process", ok: true }]
+    });
     expect(capabilities.statusCode).toBe(200);
     expect(capabilities.json()).toMatchObject({
       service: "efs-scribe",
@@ -1736,7 +1746,8 @@ const testConfig: AppConfig = {
     ready: false,
     missing: [],
     easAddress: EFS_SEPOLIA.eas,
-    agentFundingTargetWei: 0n
+    agentFundingTargetWei: 0n,
+    sponsorLowBalanceWei: 100_000_000_000_000_000n
   }
 };
 

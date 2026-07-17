@@ -50,7 +50,8 @@ describe("parseEnv", () => {
       missing: [],
       rpcUrl: "https://sepolia.example.test/rpc",
       easAddress: EFS_SEPOLIA.eas,
-      agentFundingTargetWei: 50_000_000_000_000_000n
+      agentFundingTargetWei: 50_000_000_000_000_000n,
+      sponsorLowBalanceWei: 100_000_000_000_000_000n
     });
     expect(config.ipfs).toEqual({
       apiUrl: "http://127.0.0.1:5001/api/v0",
@@ -97,6 +98,26 @@ describe("parseEnv", () => {
     });
 
     expect(config.sepolia.agentFundingTargetWei).toBe(50_000_000_000_000_000n);
+  });
+
+  it("allows the Sepolia sponsor low balance threshold to be configured", () => {
+    const config = parseEnv({
+      EFS_SCRIBE_MODE: "sepolia",
+      API_KEYS_JSON: '{"local-scribe-key":"api-key:local-scribe-agent"}',
+      AGENT_KEY_DERIVATION_SECRET: "realistic-non-default-derivation-secret",
+      PUBLIC_BASE_URL: "http://localhost:3000",
+      PORT: "3000",
+      LOG_LEVEL: "silent",
+      EFS_CHAIN_ID: "11155111",
+      EFS_EAS_ADDRESS: EFS_SEPOLIA.eas,
+      SEPOLIA_RPC_URL: "https://sepolia.example.test/rpc",
+      SEPOLIA_AGENT_FUNDING_TARGET_WEI: "0",
+      SEPOLIA_SPONSOR_LOW_BALANCE_WEI: "250000000000000000",
+      SERVICE_SPONSOR_PRIVATE_KEY: "",
+      RECEIPT_SIGNER_PRIVATE_KEY: ""
+    });
+
+    expect(config.sepolia.sponsorLowBalanceWei).toBe(250_000_000_000_000_000n);
   });
 
   it("does not mark Sepolia mode ready with a non-Sepolia chain id", () => {

@@ -9,6 +9,7 @@ const DEFAULT_DERIVATION_SECRET = "offline-development-secret";
 const MIN_SEPOLIA_AGENT_FUNDING_TARGET_WEI = 50_000_000_000_000_000n;
 const DEFAULT_SEPOLIA_AGENT_FUNDING_TARGET_WEI =
   MIN_SEPOLIA_AGENT_FUNDING_TARGET_WEI.toString();
+const DEFAULT_SEPOLIA_SPONSOR_LOW_BALANCE_WEI = "100000000000000000";
 
 const EnvSchema = z.object({
   EFS_SCRIBE_MODE: z.enum(["offline", "sepolia"]).default("offline"),
@@ -29,6 +30,7 @@ const EnvSchema = z.object({
     .default(SEPOLIA_EAS_ADDRESS),
   SEPOLIA_RPC_URL: z.string().default(""),
   SEPOLIA_AGENT_FUNDING_TARGET_WEI: z.string().default(DEFAULT_SEPOLIA_AGENT_FUNDING_TARGET_WEI),
+  SEPOLIA_SPONSOR_LOW_BALANCE_WEI: z.string().default(DEFAULT_SEPOLIA_SPONSOR_LOW_BALANCE_WEI),
   SERVICE_SPONSOR_PRIVATE_KEY: z.string().default(""),
   RECEIPT_SIGNER_PRIVATE_KEY: z.string().default("")
 });
@@ -39,6 +41,7 @@ export interface SepoliaConfig {
   rpcUrl?: string;
   easAddress: `0x${string}`;
   agentFundingTargetWei: bigint;
+  sponsorLowBalanceWei: bigint;
   serviceSponsorPrivateKey?: `0x${string}`;
   receiptSignerPrivateKey?: `0x${string}`;
 }
@@ -87,6 +90,7 @@ function buildSepoliaConfig(parsed: z.infer<typeof EnvSchema>): SepoliaConfig {
   const agentFundingTargetWei = normalizeAgentFundingTarget(
     parseWei(parsed.SEPOLIA_AGENT_FUNDING_TARGET_WEI)
   );
+  const sponsorLowBalanceWei = parseWei(parsed.SEPOLIA_SPONSOR_LOW_BALANCE_WEI);
   const serviceSponsorPrivateKey = usablePrivateKey(parsed.SERVICE_SPONSOR_PRIVATE_KEY);
   const receiptSignerPrivateKey = usablePrivateKey(parsed.RECEIPT_SIGNER_PRIVATE_KEY);
 
@@ -109,6 +113,7 @@ function buildSepoliaConfig(parsed: z.infer<typeof EnvSchema>): SepoliaConfig {
     rpcUrl,
     easAddress: parsed.EFS_EAS_ADDRESS as `0x${string}`,
     agentFundingTargetWei,
+    sponsorLowBalanceWei,
     serviceSponsorPrivateKey,
     receiptSignerPrivateKey
   };
