@@ -1278,10 +1278,7 @@ describe("HTTP API", () => {
 
     expect(response.statusCode).toBe(200);
     const receipt = response.json().receipt as EfsScribeReceipt;
-    const auditLogs = lines
-      .map((line) => JSON.parse(line) as { msg?: string; audit?: Record<string, unknown> })
-      .filter((line) => line.msg === "efs_scribe.audit")
-      .map((line) => line.audit);
+    const auditLogs = auditLogsFrom(lines);
     const writeAudit = auditLogs.find((audit) => audit?.event === "file.write");
 
     expect(writeAudit).toMatchObject({
@@ -1293,10 +1290,157 @@ describe("HTTP API", () => {
       path: "/agents/demo/status.json",
       receipt_id: receipt.receipt_id,
       attester: receipt.agent_lens.attester,
+      data_uid: receipt.efs.uids.data,
+      file_anchor_uid: receipt.efs.uids.file_anchor,
+      placement_pin_uid: receipt.efs.uids.placement_pin,
+      uids: receipt.efs.uids,
       tx_hashes_count: 0,
       authenticated_subject_hash: expect.stringMatching(/^sha256:[0-9a-f]{64}$/)
     });
     expect(JSON.stringify(auditLogs)).not.toContain("local-scribe-key");
+
+    await app.close();
+  });
+
+  it("emits structured audit logs for raw byte writes", async () => {
+    const lines: string[] = [];
+    const app = Fastify({
+      logger: {
+        level: "info",
+        stream: {
+          write(line: string) {
+            lines.push(line);
+          }
+        }
+      }
+    });
+    await registerRoutes(app, testConfig, new OfflineEfsWriter());
+
+    const response = await app.inject({
+      method: "PUT",
+      url: "/v1/files?path=%2Fagents%2Fdemo%2Fraw-audit.json",
+      headers: {
+        authorization: "Bearer local-scribe-key",
+        "content-type": "application/json",
+        "idempotency-key": "raw-audit-001",
+        "x-efs-storage": "metadata_only",
+        "x-nanda-agent": "agent:demo"
+      },
+      payload: Buffer.from('{"ok":true}', "utf8")
+    });
+
+    expect(response.statusCode).toBe(200);
+    const receipt = response.json().receipt as EfsScribeReceipt;
+    const auditLogs = auditLogsFrom(lines);
+    const writeAudit = auditLogs.find((audit) => audit?.event === "file.write");
+
+    expect(writeAudit).toMatchObject({
+      service: "efs-scribe",
+      event: "file.write",
+      method: "PUT",
+      route: "/v1/files",
+      operation: "file.upsert",
+      status: "confirmed",
+      mode: "offline",
+      path: "/agents/demo/raw-audit.json",
+      receipt_id: receipt.receipt_id,
+      payload_sha256: response.json().payload_sha256,
+      data_uid: receipt.efs.uids.data,
+      file_anchor_uid: receipt.efs.uids.file_anchor,
+      placement_pin_uid: receipt.efs.uids.placement_pin,
+      uids: receipt.efs.uids,
+      authenticated_subject_hash: expect.stringMatching(/^sha256:[0-9a-f]{64}$/)
+    });
+    expect(JSON.stringify(auditLogs)).not.toContain("local-scribe-key");
+
+    await app.close();
+  });
+
+  it("emits contextual audit logs for plans and request errors", async () => {
+    const lines: string[] = [];
+    const app = Fastify({
+      logger: {
+        level: "info",
+        stream: {
+          write(line: string) {
+            lines.push(line);
+          }
+        }
+      }
+    });
+    await registerRoutes(app, testConfig, new OfflineEfsWriter());
+
+    const plan = await app.inject({
+      method: "POST",
+      url: "/v1/files/plan",
+      headers: { authorization: "Bearer local-scribe-key" },
+      payload: {
+        ...writeBody,
+        options: { idempotency_key: "audit-plan-001" }
+      }
+    });
+    const invalidAuth = await app.inject({
+      method: "POST",
+      url: "/v1/files",
+      headers: { authorization: "Bearer definitely-not-the-key" },
+      payload: writeBody
+    });
+    const invalidWrite = await app.inject({
+      method: "POST",
+      url: "/v1/files",
+      headers: { authorization: "Bearer local-scribe-key" },
+      payload: {
+        ...writeBody,
+        path: "/agents/demo/bad-audit.json",
+        properties: {
+          ...writeBody.properties,
+          contentHash: "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+        },
+        options: { idempotency_key: "bad-audit-001" }
+      }
+    });
+
+    expect(plan.statusCode).toBe(200);
+    expect(invalidAuth.statusCode).toBe(401);
+    expect(invalidWrite.statusCode).toBe(400);
+
+    const auditLogs = auditLogsFrom(lines);
+    const planAudit = auditLogs.find((audit) => audit?.event === "file.plan" && audit.route === "/v1/files/plan");
+    const authError = auditLogs.find((audit) => audit?.event === "request.error" && audit.status_code === 401);
+    const writeError = auditLogs.find((audit) =>
+      audit?.event === "request.error" && audit.path === "/agents/demo/bad-audit.json"
+    );
+
+    expect(planAudit).toMatchObject({
+      event: "file.plan",
+      dry_run: true,
+      path: "/agents/demo/status.json",
+      claimed_nanda_id: "agent:demo",
+      idempotency_key_present: true,
+      planned_layers_count: expect.any(Number),
+      authenticated_subject_hash: expect.stringMatching(/^sha256:[0-9a-f]{64}$/)
+    });
+    expect(authError).toMatchObject({
+      event: "request.error",
+      route: "/v1/files",
+      status_code: 401,
+      error: "unauthorized",
+      auth_present: true,
+      auth_source: "bearer",
+      auth_scheme: "bearer"
+    });
+    expect(writeError).toMatchObject({
+      event: "request.error",
+      route: "/v1/files",
+      status_code: 400,
+      error: "bad_request",
+      path: "/agents/demo/bad-audit.json",
+      claimed_nanda_id: "agent:demo",
+      idempotency_key_present: true,
+      authenticated_subject_hash: expect.stringMatching(/^sha256:[0-9a-f]{64}$/)
+    });
+    expect(lines.join("")).not.toContain("local-scribe-key");
+    expect(lines.join("")).not.toContain("definitely-not-the-key");
 
     await app.close();
   });
@@ -1516,6 +1660,52 @@ describe("HTTP API", () => {
     await app.close();
   });
 
+  it("audits partial Sepolia failures with tx hashes and EFS UIDs", async () => {
+    const lines: string[] = [];
+    const app = Fastify({
+      logger: {
+        level: "info",
+        stream: {
+          write(line: string) {
+            lines.push(line);
+          }
+        }
+      }
+    });
+    await registerRoutes(app, testConfig, new PartialSepoliaWriter());
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/files",
+      headers: { authorization: "Bearer local-scribe-key" },
+      payload: writeBody
+    });
+
+    expect(response.statusCode).toBe(503);
+    const receipt = response.json().receipt as EfsScribeReceipt;
+    const auditLogs = auditLogsFrom(lines);
+    const writeAudit = auditLogs.find((audit) => audit?.event === "file.write");
+
+    expect(writeAudit).toMatchObject({
+      event: "file.write",
+      status: "failed",
+      mode: "sepolia",
+      path: "/agents/demo/status.json",
+      receipt_id: receipt.receipt_id,
+      tx_hashes: receipt.efs.tx_hashes,
+      tx_hashes_count: 1,
+      block_numbers: receipt.efs.block_numbers,
+      data_uid: receipt.efs.uids.data,
+      file_anchor_uid: receipt.efs.uids.file_anchor,
+      placement_pin_uid: receipt.efs.uids.placement_pin,
+      uids: receipt.efs.uids,
+      error: "sepolia_write_error"
+    });
+    expect(lines.join("")).not.toContain("local-scribe-key");
+
+    await app.close();
+  });
+
   it("reports active file placement write conflicts as client conflicts", async () => {
     const app = await appWithWriter(new ConflictingSepoliaWriter());
 
@@ -1556,6 +1746,13 @@ async function appWithWriter(writer: EfsWriter) {
   return app;
 }
 
+function auditLogsFrom(lines: string[]): Array<Record<string, unknown> | undefined> {
+  return lines
+    .map((line) => JSON.parse(line) as { msg?: string; audit?: Record<string, unknown> })
+    .filter((line) => line.msg === "efs_scribe.audit")
+    .map((line) => line.audit);
+}
+
 class SlowOfflineWriter extends OfflineEfsWriter {
   submitCount = 0;
   removeCount = 0;
@@ -1586,6 +1783,38 @@ class SlowOfflineWriter extends OfflineEfsWriter {
 class ThrowingSepoliaWriter extends OfflineEfsWriter {
   override async submitPlan(): Promise<EfsScribeReceipt> {
     throw new SepoliaSubmitError("Sepolia RPC unavailable");
+  }
+}
+
+class PartialSepoliaWriter extends OfflineEfsWriter {
+  override async submitPlan(
+    plan: EfsWritePlan,
+    context: WriterContext
+  ): Promise<EfsScribeReceipt> {
+    const receipt = await super.submitPlan(plan, context);
+    const partialReceipt: EfsScribeReceipt = {
+      ...receipt,
+      status: "failed",
+      mode: "sepolia",
+      efs: {
+        ...receipt.efs,
+        network: "sepolia",
+        tx_hashes: ["0x1111111111111111111111111111111111111111111111111111111111111111"],
+        block_numbers: [12345]
+      },
+      verification: {
+        ...receipt.verification,
+        checks: [
+          ...receipt.verification.checks,
+          {
+            name: "sepolia.partial_failure",
+            ok: false,
+            detail: "Sepolia write failed after partial submission"
+          }
+        ]
+      }
+    };
+    throw new SepoliaSubmitError("Sepolia write failed after partial submission", partialReceipt);
   }
 }
 

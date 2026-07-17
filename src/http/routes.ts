@@ -53,6 +53,7 @@ const IPFS_MAX_CONCURRENT_ADDS = 2;
 const WRITE_RATE_LIMIT_CAPACITY = 10;
 const WRITE_RATE_LIMIT_REFILL_TOKENS = 5;
 const WRITE_RATE_LIMIT_REFILL_MS = 60_000;
+const requestAuditDetails = new WeakMap<FastifyRequest, Record<string, unknown>>();
 
 const ResolveQuerySchema = z.object({
   path: z.string().min(1),
@@ -100,6 +101,7 @@ export async function registerRoutes(
 
   app.addHook("onRequest", async (request) => {
     if (isAuthenticatedWriteRoute(request.method, request.url)) {
+      rememberAuditContext(request, authAttemptAuditFields(request));
       authenticateApiKey(extractApiKey(request), apiKeys);
     }
   });
@@ -151,6 +153,17 @@ export async function registerRoutes(
       void reply.status(502).send({ error: "ipfs_read_error", message: error.message });
       return;
     }
+    request.log.error({
+      err: error,
+      audit: {
+        service: "efs-scribe",
+        event: "request.exception",
+        request_id: request.id,
+        method: request.method,
+        route: request.url.split("?")[0],
+        ...requestAuditDetails.get(request)
+      }
+    }, "efs_scribe.exception");
     auditError(request, 500, "internal_error", "Unexpected service error");
     void reply.status(500).send({ error: "internal_error", message: "Unexpected service error" });
   });
@@ -623,6 +636,7 @@ export async function registerRoutes(
         storage: parseStorageHeader(singleHeader(request.headers["x-efs-storage"]))
       });
       const context = writerContext(request, parsed, apiKeys, config);
+      rememberAuditContext(request, requestAuditContext(context, parsed));
       const submission = await writeWithOptionalIdempotency({
         parsed,
         config,
@@ -634,6 +648,7 @@ export async function registerRoutes(
         ipfsRateLimiter,
         ipfsAddSemaphore
       });
+      auditSubmission(request, "file.write", context, submission);
       return sendByteWriteSubmission(reply, submission, {
         path: parsed.path,
         contentType,
@@ -647,10 +662,24 @@ export async function registerRoutes(
   app.get("/v1/files", async (request: FastifyRequest, reply: FastifyReply) => {
     const query = ByteReadQuerySchema.parse(request.query);
     const path = normalizeEfsPath(query.path).canonicalPath;
+    rememberAuditContext(request, {
+      path,
+      requested_attester: query.attester
+    });
     const receipt = await receipts.getLatestByPath(path, query.attester);
     if (receipt === undefined || receipt.operation === "file.remove") {
       throw notFound("No readable file receipt found for path");
     }
+    rememberAuditContext(request, {
+      path,
+      requested_attester: query.attester,
+      attester: receipt.agent_lens.attester,
+      receipt_id: receipt.receipt_id,
+      operation: receipt.operation,
+      status: receipt.status,
+      payload_sha256: receipt.integrity.payload_sha256,
+      ...efsUidAuditFields(receipt)
+    });
     if (receipt.status !== "confirmed") {
       throw bytesUnavailable("Latest file receipt is not confirmed");
     }
@@ -660,6 +689,7 @@ export async function registerRoutes(
     if (mirror === undefined) {
       throw bytesUnavailable("Latest file receipt does not declare a retrievable IPFS mirror");
     }
+    rememberAuditContext(request, { mirror_transport: mirror.transport });
 
     const fetched = await readFromIpfs(config.ipfs, {
       uri: mirror.uri,
@@ -675,6 +705,7 @@ export async function registerRoutes(
       attester: receipt.agent_lens.attester,
       receipt_id: receipt.receipt_id,
       payload_sha256: receipt.integrity.payload_sha256,
+      ...efsUidAuditFields(receipt),
       mirror_transport: mirror.transport,
       byte_length: fetched.bytes.byteLength
     });
@@ -693,6 +724,7 @@ export async function registerRoutes(
   app.post("/v1/files/plan", async (request: FastifyRequest) => {
     const parsed = FileWriteRequestSchema.parse(request.body);
     const context = writerContext(request, parsed, apiKeys, config);
+    rememberAuditContext(request, requestAuditContext(context, parsed));
     const prepared = await prepareFileWriteRequest(parsed, config, {
       onlyHashIpfs: true,
       authenticatedSubject: context.auth.authenticated_subject,
@@ -706,6 +738,7 @@ export async function registerRoutes(
 
     auditInfo(request, "file.plan", {
       ...requestAuditContext(context, prepared),
+      dry_run: true,
       storage: prepared.options.storage,
       content_mode: prepared.content.mode,
       mirrors_count: prepared.mirrors.length,
@@ -718,6 +751,7 @@ export async function registerRoutes(
   app.post("/v1/files", async (request: FastifyRequest, _reply: FastifyReply) => {
     const parsed = FileWriteRequestSchema.parse(request.body);
     const context = writerContext(request, parsed, apiKeys, config);
+    rememberAuditContext(request, requestAuditContext(context, parsed));
     if (parsed.options.dry_run) {
       const prepared = await prepareFileWriteRequest(parsed, config, {
         onlyHashIpfs: true,
@@ -758,6 +792,7 @@ export async function registerRoutes(
   app.post("/v1/files/delete", async (request: FastifyRequest, _reply: FastifyReply) => {
     const parsed = FileRemoveRequestSchema.parse(request.body);
     const context = writerContext(request, parsed, apiKeys, config);
+    rememberAuditContext(request, requestAuditContext(context, parsed));
     requireFileDeleteCapability(context);
     const submission = await removeWithOptionalIdempotency({
       receipts,
@@ -773,6 +808,7 @@ export async function registerRoutes(
 
   app.get("/v1/receipts/:receiptId", async (request: FastifyRequest) => {
     const { receiptId } = request.params as { receiptId: string };
+    rememberAuditContext(request, { receipt_id: receiptId });
     const receipt = await receipts.get(receiptId);
     if (receipt === undefined) {
       throw notFound("Receipt not found");
@@ -784,6 +820,7 @@ export async function registerRoutes(
       mode: receipt.mode,
       path: receipt.efs.path,
       attester: receipt.agent_lens.attester,
+      ...efsUidAuditFields(receipt),
       tx_hashes_count: receipt.efs.tx_hashes.length
     });
     return { receipt, links: receipt.links };
@@ -793,6 +830,10 @@ export async function registerRoutes(
     const query = ResolveQuerySchema.parse(request.query);
 
     const path = normalizeEfsPath(query.path).canonicalPath;
+    rememberAuditContext(request, {
+      path,
+      requested_attester: query.attester
+    });
     const receipt = await receipts.getLatestByPath(path, query.attester);
     if (receipt === undefined) {
       throw notFound("No receipt found for path");
@@ -804,7 +845,8 @@ export async function registerRoutes(
       receipt_id: receipt.receipt_id,
       operation: receipt.operation,
       status: receipt.status,
-      payload_sha256: receipt.integrity.payload_sha256
+      payload_sha256: receipt.integrity.payload_sha256,
+      ...efsUidAuditFields(receipt)
     });
 
     return {
@@ -822,6 +864,16 @@ export async function registerRoutes(
   app.post("/v1/verify", async (request: FastifyRequest) => {
     const body = VerifyReceiptBodySchema.parse(request.body);
     const receipt = body.receipt;
+    rememberAuditContext(request, {
+      receipt_id: receipt.receipt_id,
+      operation: receipt.operation,
+      status: receipt.status,
+      mode: receipt.mode,
+      path: receipt.efs.path,
+      attester: receipt.agent_lens.attester,
+      ...efsUidAuditFields(receipt),
+      tx_hashes_count: receipt.efs.tx_hashes.length
+    });
     const verification = await writer.verifyReceipt(receipt);
     auditInfo(request, "receipt.verify", {
       receipt_id: receipt.receipt_id,
@@ -830,6 +882,7 @@ export async function registerRoutes(
       mode: receipt.mode,
       path: receipt.efs.path,
       attester: receipt.agent_lens.attester,
+      ...efsUidAuditFields(receipt),
       tx_hashes_count: receipt.efs.tx_hashes.length,
       checks_count: verification.checks.length,
       checks_failed_count: verification.checks.filter((check) => !check.ok).length
@@ -1153,11 +1206,41 @@ function auditError(
       request_id: request.id,
       method: request.method,
       route: request.url.split("?")[0],
+      ...requestAuditDetails.get(request),
       status_code: statusCode,
       error: code,
       message: truncateForLog(message)
     }
   }, "efs_scribe.audit");
+}
+
+function rememberAuditContext(request: FastifyRequest, details: Record<string, unknown>): void {
+  requestAuditDetails.set(request, {
+    ...requestAuditDetails.get(request),
+    ...details
+  });
+}
+
+function authAttemptAuditFields(request: FastifyRequest): Record<string, unknown> {
+  const authorization = request.headers.authorization;
+  const hasBearer = authorization?.startsWith("Bearer ") === true;
+  const hasApiKeyHeader = request.headers["x-api-key"] !== undefined;
+  return {
+    auth_present: authorization !== undefined || hasApiKeyHeader,
+    auth_source: hasBearer ? "bearer" : hasApiKeyHeader ? "x-api-key" : undefined,
+    auth_scheme: authorization === undefined ? undefined : authorization.split(/\s+/, 1)[0]?.toLowerCase()
+  };
+}
+
+function efsUidAuditFields(receipt: EfsScribeReceipt): Record<string, unknown> {
+  return {
+    data_uid: receipt.efs.uids.data,
+    file_anchor_uid: receipt.efs.uids.file_anchor,
+    placement_pin_uid: receipt.efs.uids.placement_pin,
+    mirror_uids: receipt.efs.uids.mirrors,
+    property_uids: receipt.efs.uids.properties,
+    uids: receipt.efs.uids
+  };
 }
 
 function auditSubmission(
@@ -1180,6 +1263,7 @@ function auditSubmission(
     block_numbers: receipt.efs.block_numbers,
     mirrors_count: receipt.efs.mirrors.length,
     properties_count: Object.keys(receipt.efs.uids.properties).length,
+    ...efsUidAuditFields(receipt),
     checks_count: receipt.verification.checks.length,
     checks_failed_count: receipt.verification.checks.filter((check) => !check.ok).length,
     error: submission.error === undefined ? undefined : "sepolia_write_error",
