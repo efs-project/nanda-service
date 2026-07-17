@@ -201,6 +201,12 @@ JSON body does not report `"mode": "sepolia"` in production. Search Railway logs
 for `efs_scribe.alert` to see failed check names and details such as
 `sepolia_sponsor_balance`, balance, and threshold.
 
+This repo also includes a scheduled GitHub Actions monitor:
+`.github/workflows/deep-health.yml`. It runs `npm run health:check` against the
+production `/health/deep` endpoint every 15 minutes and fails the workflow when
+the service is degraded or not running in Sepolia mode. Enable GitHub Actions
+email notifications on the repo/account to receive those failures by email.
+
 Receipt lookup is currently memory-only. On-chain writes remain on Sepolia, but
 `GET /v1/receipts/:id` and `GET /v1/resolve` only know receipts created since
 the current service process started.

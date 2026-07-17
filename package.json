@@ -10,6 +10,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "dev": "tsx watch src/server.ts",
+    "health:check": "node scripts/check-deep-health.mjs",
     "start": "node dist/src/server.js",
     "test": "vitest run",
     "test:watch": "vitest",
